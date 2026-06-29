@@ -778,6 +778,8 @@ class NewMemberForwarderPlugin(Star):
         items: list[dict[str, Any]],
         self_id: str = "",
         group_id: str = "",
+        *,
+        skip_warmup: bool = False,
     ) -> None:
         gap = max(0.0, self._get_float("message_gap_seconds", 0.8))
         for item in items:
@@ -789,8 +791,17 @@ class NewMemberForwarderPlugin(Star):
 
         if self._string(group_id):
             await self._wait_private_context_ready(bot, group_id, user_id, self_id)
-        if self._should_send_warmup_message(items):
-            await self._send_plain_warmup_message_with_retries(bot, user_id, self_id, group_id)
+        if not skip_warmup and self._should_send_warmup_message(items):
+            try:
+                await self._send_plain_warmup_message_with_retries(bot, user_id, self_id, group_id)
+            except Exception as exc:
+                logger.warning(
+                    "new_member_forwarder: warmup message failed for user %s in group %s; "
+                    "continue to recorded material: %s",
+                    user_id,
+                    group_id or "-",
+                    self._short_error(exc),
+                )
 
         retry_delays = self._get_float_list("temp_session_retry_delays_seconds", [3.0, 8.0])
         for item in items:
@@ -1684,7 +1695,14 @@ class NewMemberForwarderPlugin(Star):
 
         try:
             # The user has opened the private chat, so send without source group_id.
-            await self._deliver_private_with_retries(bot, user_id, items, self_id, "")
+            await self._deliver_private_with_retries(
+                bot,
+                user_id,
+                items,
+                self_id,
+                "",
+                skip_warmup=True,
+            )
             self._mark_delivery_success(group_id, user_id)
             logger.info(
                 "new_member_forwarder: sent pending private delivery to user %s from group %s.",
