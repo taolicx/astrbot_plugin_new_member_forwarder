@@ -1,0 +1,174 @@
+{
+  "enabled": {
+    "type": "bool",
+    "description": "是否启用新人入群自动私聊发送。",
+    "default": true
+  },
+  "admin_user_ids": {
+    "type": "list",
+    "description": "允许私聊录制资料的管理员 QQ 号。留空表示任何私聊用户都能录制。",
+    "default": []
+  },
+  "allowed_groups": {
+    "type": "list",
+    "description": "生效群号列表。留空表示所有群都生效。",
+    "default": []
+  },
+  "send_delay_seconds": {
+    "type": "float",
+    "description": "收到入群通知后延迟多少秒私聊发送。",
+    "default": 1.5
+  },
+  "message_gap_seconds": {
+    "type": "float",
+    "description": "新人资料有多条私信时，每条私信之间的间隔秒数。",
+    "default": 0.8
+  },
+  "dedupe_window_seconds": {
+    "type": "float",
+    "description": "同一新人重复入群通知去重窗口，单位秒。",
+    "default": 30.0
+  },
+  "prepare_temp_session_before_send": {
+    "type": "bool",
+    "description": "发送前先读取一次群成员信息，帮助协议端准备群临时会话。",
+    "default": true
+  },
+  "validate_group_member_before_send": {
+    "type": "bool",
+    "description": "发送前刷新群成员列表并确认目标 QQ 在来源群内；llbot 临时会话不稳定时建议开启。",
+    "default": true
+  },
+  "forward_warmup_message_enabled": {
+    "type": "bool",
+    "description": "发送资料前是否额外发送一条普通私聊文字，用来打通群临时会话。",
+    "default": true
+  },
+  "forward_warmup_message_text": {
+    "type": "text",
+    "description": "额外第一条开路消息的文字内容。留空则不发送。",
+    "default": "欢迎进群"
+  },
+  "forward_warmup_delay_seconds": {
+    "type": "float",
+    "description": "开路消息发送成功后，等待多少秒再发送录制资料。",
+    "default": 1.0
+  },
+  "temp_session_retry_delays_seconds": {
+    "type": "list",
+    "description": "遇到临时会话未就绪或成员列表未同步时的延迟重试秒数列表。",
+    "default": [5.0, 15.0, 30.0, 60.0]
+  },
+  "pending_delivery_enabled": {
+    "type": "bool",
+    "description": "入群时临时私聊被拒绝后，是否挂起发送，等新人先私聊机器人后自动补发资料。",
+    "default": true
+  },
+  "pending_expire_seconds": {
+    "type": "float",
+    "description": "挂起补发记录保留秒数；0 表示永不过期。",
+    "default": 86400.0
+  },
+  "pending_delivery_notice_enabled": {
+    "type": "bool",
+    "description": "挂起补发时是否在群里提醒新人先私聊机器人。",
+    "default": true
+  },
+  "pending_delivery_notice_at_user": {
+    "type": "bool",
+    "description": "群内挂起提醒是否 @ 新人。",
+    "default": true
+  },
+  "pending_delivery_notice_text": {
+    "type": "text",
+    "description": "群内挂起提醒文字，支持 {user_id} 和 {group_id} 占位符。",
+    "default": "欢迎进群，请先私聊我一下，我把资料发给你。"
+  },
+  "delivery_limit_enabled": {
+    "type": "bool",
+    "description": "是否启用新人资料发送次数限制。",
+    "default": true
+  },
+  "delivery_limit_scope": {
+    "type": "string",
+    "description": "发送次数统计范围：user 表示跨所有群按 QQ 去重，user_group 表示按 QQ+群分别统计。",
+    "default": "user"
+  },
+  "max_deliveries_per_recipient": {
+    "type": "int",
+    "description": "同一统计对象最多发送几次新人资料。0 或负数表示不限制。",
+    "default": 2
+  },
+  "delivery_history_expire_days": {
+    "type": "float",
+    "description": "发送次数记录保留天数。0 表示永不过期。",
+    "default": 0.0
+  },
+  "save_incoming_images": {
+    "type": "bool",
+    "description": "录制图片时是否尝试下载到本地，避免图片链接过期。",
+    "default": true
+  },
+  "send_to_bot_itself": {
+    "type": "bool",
+    "description": "机器人自己入群时是否也触发发送。",
+    "default": false
+  },
+  "private_image_reply_enabled": {
+    "type": "bool",
+    "description": "是否启用私聊一图/两图自动回复。",
+    "default": true
+  },
+  "image_wait_seconds": {
+    "type": "float",
+    "description": "收到第一张私聊图片后等待第二张图的秒数。",
+    "default": 10.0
+  },
+  "one_image_reply": {
+    "type": "text",
+    "description": "一图回复文字；留空则不发送文字。",
+    "default": "已收到你发来的图片。"
+  },
+  "one_image_reply_image_enabled": {
+    "type": "bool",
+    "description": "是否启用后台上传的一图回复图片。",
+    "default": false
+  },
+  "one_image_reply_image": {
+    "type": "file",
+    "description": "后台上传的一图回复图片。",
+    "default": [],
+    "file_types": ["png", "jpg", "jpeg", "webp", "gif"]
+  },
+  "one_image_reply_order": {
+    "type": "string",
+    "description": "一图回复顺序，支持 text,image 或 image,text。",
+    "default": "text,image"
+  },
+  "two_image_reply": {
+    "type": "text",
+    "description": "两图回复文字；留空则不发送文字。",
+    "default": "已收到你发来的两张图片。"
+  },
+  "two_image_reply_image_enabled": {
+    "type": "bool",
+    "description": "是否启用后台上传的两图回复图片。",
+    "default": false
+  },
+  "two_image_reply_image": {
+    "type": "file",
+    "description": "后台上传的两图回复图片。",
+    "default": [],
+    "file_types": ["png", "jpg", "jpeg", "webp", "gif"]
+  },
+  "two_image_reply_order": {
+    "type": "string",
+    "description": "两图回复顺序，支持 text,image 或 image,text。",
+    "default": "text,image"
+  },
+  "image_reply_delay_seconds": {
+    "type": "float",
+    "description": "一图/两图规则同时发送文字和图片时，两条消息之间的间隔秒数。",
+    "default": 0.3
+  }
+}
