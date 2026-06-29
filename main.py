@@ -28,7 +28,7 @@ class TempSessionNotReadyError(RuntimeError):
     PLUGIN_NAME,
     "Codex",
     "管理员私聊录制新人入群资料，新人进群时自动私聊转发文字、图片和聊天记录。",
-    "1.4.9",
+    "1.4.11",
 )
 class NewMemberForwarderPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig | None = None):
@@ -289,6 +289,48 @@ class NewMemberForwarderPlugin(Star):
             return
 
         yield event.plain_result(f"已私聊 QQ {user_id} 执行一次测试发送。")
+
+    @filter.platform_adapter_type(filter.PlatformAdapterType.AIOCQHTTP)
+    @filter.command("新人欢迎开路测试")
+    async def test_warmup_delivery(self, event: AstrMessageEvent, target_qq: str = "", source_group_id: str = ""):
+        if not self._is_admin(self._string(event.get_sender_id())):
+            return
+
+        user_id = self._string(target_qq or event.get_sender_id())
+        group_id = self._string(source_group_id or event.get_group_id())
+        text = self._string(self._get("forward_warmup_message_text", "欢迎进群")).strip()
+        if not text:
+            yield event.plain_result("开路消息为空，请先在后台设置 forward_warmup_message_text。")
+            return
+        if not user_id.isdigit() or not group_id.isdigit():
+            yield event.plain_result("用法：/新人欢迎开路测试 QQ号 来源群号")
+            return
+
+        bot = getattr(event, "bot", None)
+        if not bot:
+            yield event.plain_result("当前事件没有 OneBot bot 实例，无法测试发送。")
+            return
+
+        self_id = self._string(event.get_self_id())
+        try:
+            await self._wait_private_context_ready(bot, group_id, user_id, self_id)
+            await self._send_plain_warmup_message_with_retries(bot, user_id, self_id, group_id)
+        except Exception as exc:
+            if isinstance(exc, TempSessionNotReadyError):
+                yield event.plain_result(
+                    f"开路消息失败：LLBot 当前没有在群 {group_id} 的成员列表里确认 QQ {user_id}。"
+                )
+                return
+            if self._is_friend_required_error(exc):
+                yield event.plain_result(
+                    f"开路消息失败：QQ/LLBot 拒绝给 QQ {user_id} 发群临时私聊。"
+                )
+                return
+            logger.exception("new_member_forwarder: warmup-only test failed: %s", exc)
+            yield event.plain_result(f"开路消息失败：{self._short_error(exc)}")
+            return
+
+        yield event.plain_result(f"已发送开路消息给 QQ {user_id}，来源群 {group_id}。")
 
     @filter.platform_adapter_type(filter.PlatformAdapterType.AIOCQHTTP)
     @filter.command("新人欢迎诊断")
@@ -1707,13 +1749,13 @@ class NewMemberForwarderPlugin(Star):
             return True
 
         try:
-            # The user has opened the private chat, so send without source group_id.
+            # LLBot still needs the source group_id for non-friend temporary sessions.
             await self._deliver_private_with_retries(
                 bot,
                 user_id,
                 items,
                 self_id,
-                "",
+                group_id,
                 skip_warmup=True,
             )
             self._mark_delivery_success(group_id, user_id)
