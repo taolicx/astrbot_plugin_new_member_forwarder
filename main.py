@@ -28,7 +28,7 @@ class TempSessionNotReadyError(RuntimeError):
     PLUGIN_NAME,
     "Codex",
     "管理员私聊录制新人入群资料，新人进群时自动私聊转发文字、图片和聊天记录。",
-    "1.4.6",
+    "1.4.9",
 )
 class NewMemberForwarderPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig | None = None):
@@ -497,6 +497,7 @@ class NewMemberForwarderPlugin(Star):
                 [{"type": "text", "data": {"text": text}}],
                 group_id=group_id,
                 self_id=self_id,
+                allow_without_group_retry=False,
             )
             logger.info(
                 "new_member_forwarder: sent plain warmup message via send_private_msg to user %s in group %s.",
@@ -797,11 +798,12 @@ class NewMemberForwarderPlugin(Star):
             except Exception as exc:
                 logger.warning(
                     "new_member_forwarder: warmup message failed for user %s in group %s; "
-                    "continue to recorded material: %s",
+                    "stop this delivery before recorded material: %s",
                     user_id,
                     group_id or "-",
                     self._short_error(exc),
                 )
+                raise
 
         retry_delays = self._get_float_list("temp_session_retry_delays_seconds", [3.0, 8.0])
         for item in items:
@@ -1219,16 +1221,19 @@ class NewMemberForwarderPlugin(Star):
         *,
         group_id: str = "",
         self_id: str = "",
+        allow_without_group_retry: bool = True,
     ) -> None:
         payload: dict[str, Any] = {
             "user_id": int(user_id),
             "message": segments,
         }
+        payload.update(self._routing_kwargs(self_id))
         await self._call_private_action(
             bot,
             "send_private_msg",
             target_user_id=user_id,
             group_id=group_id,
+            allow_without_group_retry=allow_without_group_retry,
             **payload,
         )
 
@@ -1239,6 +1244,7 @@ class NewMemberForwarderPlugin(Star):
         *,
         target_user_id: str,
         group_id: str = "",
+        allow_without_group_retry: bool = True,
         **params: Any,
     ) -> Any:
         group_id = self._string(group_id)
@@ -1254,6 +1260,13 @@ class NewMemberForwarderPlugin(Star):
                 return await bot.call_action(action, group_id=int(group_id), **params)
             except Exception as exc:
                 if self._is_friend_required_error(exc):
+                    raise
+                if not allow_without_group_retry:
+                    logger.warning(
+                        "new_member_forwarder: %s with source group failed and fallback without group_id is disabled: %s",
+                        action,
+                        self._short_error(exc),
+                    )
                     raise
                 logger.info(
                     "new_member_forwarder: %s with source group failed; retrying without group_id: %s",
