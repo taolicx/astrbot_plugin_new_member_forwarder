@@ -2,7 +2,7 @@ name: astrbot_plugin_new_member_forwarder
 display_name: 新人入群资料转发
 desc: 新人进群时自动发送/转发指定聊天记录、图片和文字，支持跨群发送限次、私信间隔和私聊一图/两图自动回复，适用于 AstrBot + llbot/OneBot v11。
 short_desc: 私聊录制新人资料包、限次去重和图片回复
-version: 1.4.9
+version: 1.4.11
 author: Codex
 repo: ""
 support_platforms:
