@@ -28,7 +28,7 @@ class TempSessionNotReadyError(RuntimeError):
     PLUGIN_NAME,
     "Codex",
     "管理员私聊录制新人入群资料，新人进群时自动私聊转发文字、图片和聊天记录。",
-    "1.4.11",
+    "1.4.12",
 )
 class NewMemberForwarderPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig | None = None):
@@ -836,16 +836,15 @@ class NewMemberForwarderPlugin(Star):
             await self._wait_private_context_ready(bot, group_id, user_id, self_id)
         if not skip_warmup and self._should_send_warmup_message(items):
             try:
-                await self._send_plain_warmup_message_with_retries(bot, user_id, self_id, group_id)
+                await self._send_plain_warmup_message(bot, user_id, self_id, group_id)
             except Exception as exc:
                 logger.warning(
-                    "new_member_forwarder: warmup message failed for user %s in group %s; "
-                    "stop this delivery before recorded material: %s",
+                    "new_member_forwarder: warmup message failed once for user %s in group %s; "
+                    "continue to recorded material: %s",
                     user_id,
                     group_id or "-",
                     self._short_error(exc),
                 )
-                raise
 
         retry_delays = self._get_float_list("temp_session_retry_delays_seconds", [3.0, 8.0])
         for item in items:
