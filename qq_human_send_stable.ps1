@@ -396,23 +396,59 @@ function Read-ImageOcrLines([string]$Path) {
   @($rows)
 }
 
-function Get-MemberSearchY($Frame, [string]$ShotPath) {
+function Get-MemberSearchProbe($Frame, [string]$ShotPath) {
+  $result = [ordered]@{
+    Y = 0
+    Text = ""
+    Strong = $false
+    Reason = "none"
+  }
   try {
     $rightPanelMinX = [Math]::Max(0, $Frame.Width - 430)
+    $rightPanelMaxX = $Frame.Width + 8
+    $topMin = 85
+    $topMax = [Math]::Min([Math]::Max(360, [int]($Frame.Height * 0.55)), $Frame.Height - 90)
+    $weakCandidate = $null
     foreach ($line in @(Read-ImageOcrLines $ShotPath)) {
       $text = (($line.Text + "") -replace "\s+", "")
       $centerX = [double]$line.Left + ([double]$line.Width / 2.0)
-      if ($centerX -lt $rightPanelMinX) { continue }
-      if ($text -like "*群成员*" -or $text -like "*成员*") {
+      $centerY = [double]$line.Top + ([double]$line.Height / 2.0)
+      if ($centerX -lt $rightPanelMinX -or $centerX -gt $rightPanelMaxX) { continue }
+      if ($centerY -lt $topMin -or $centerY -gt $topMax) { continue }
+      if ($text -like "*群成员*") {
         $y = [int]($Frame.Top + [double]$line.Top + ([double]$line.Height / 2.0))
-        Write-TraceStage ("member-search-y-ocr text=" + $text + " y=" + $y)
-        return $y
+        $result.Y = $y
+        $result.Text = $text
+        $result.Strong = $true
+        $result.Reason = "ocr-group-member"
+        Write-TraceStage ("member-search-probe strong text=" + $text + " y=" + $y)
+        return [pscustomobject]$result
+      }
+      if ($text -like "*成员*" -and -not $weakCandidate) {
+        $weakCandidate = [pscustomobject]@{
+          Y = [int]($Frame.Top + [double]$line.Top + ([double]$line.Height / 2.0))
+          Text = $text
+        }
       }
     }
+    if ($weakCandidate) {
+      $result.Y = [int]$weakCandidate.Y
+      $result.Text = $weakCandidate.Text
+      $result.Strong = $false
+      $result.Reason = "ocr-member-weak"
+      Write-TraceStage ("member-search-probe weak text=" + $result.Text + " y=" + $result.Y)
+      return [pscustomobject]$result
+    }
   } catch {
-    Write-TraceStage ("member-search-y-ocr-failed " + $_.Exception.Message)
+    $result.Reason = "ocr-failed"
+    Write-TraceStage ("member-search-probe-ocr-failed " + $_.Exception.Message)
   }
-  return 0
+  [pscustomobject]$result
+}
+
+function Get-MemberSearchY($Frame, [string]$ShotPath) {
+  $probe = Get-MemberSearchProbe $Frame $ShotPath
+  return [int]$probe.Y
 }
 
 function Assert-ProfileQQ([string]$ShotPath, [string]$ExpectedQQ) {
@@ -655,24 +691,96 @@ function Wait-ForGroupPanel($Frame, [int]$Seconds) {
   throw ("group member panel was not detected; score=" + ($last | ConvertTo-Json -Compress))
 }
 
+function Get-GroupPageProbe($Frame, [string]$ShotPath) {
+  $score = Get-GroupPanelScore $Frame
+  $memberProbe = Get-MemberSearchProbe $Frame $ShotPath
+  $memberSearchY = [int]$memberProbe.Y
+  $memberStrong = [bool]$memberProbe.Strong
+  $pixelAssist = [bool]($score.Ratio -gt 0.035)
+  $automationAssist = [bool]($score.AutomationScore -gt 0)
+  $looksLikeGroup = [bool](
+    $score.GroupPanelDetected -or
+    $memberStrong -or
+    ($memberSearchY -gt 0 -and ($pixelAssist -or $automationAssist))
+  )
+  $confidence = "none"
+  if ($score.GroupPanelDetected) {
+    $confidence = "group-panel"
+  } elseif ($memberStrong) {
+    $confidence = "ocr-group-member"
+  } elseif ($memberSearchY -gt 0 -and ($pixelAssist -or $automationAssist)) {
+    $confidence = "weak-ocr-assisted"
+  } elseif ($memberSearchY -gt 0) {
+    $confidence = "weak-ocr-only"
+  }
+  [pscustomobject]@{
+    LooksLikeGroup = $looksLikeGroup
+    Confidence = $confidence
+    Score = $score
+    MemberSearchY = $memberSearchY
+    MemberSearchText = $memberProbe.Text
+    MemberSearchStrong = $memberStrong
+    MemberSearchReason = $memberProbe.Reason
+    Shot = $ShotPath
+  }
+}
+
 function Test-CurrentPageLooksLikeGroup($Frame) {
   $probeShot = Save-Shot $Frame "02-current-page-before-decision.png"
   [void]$shots.Add($probeShot)
-  $score = Get-GroupPanelScore $Frame
-  $memberSearchY = Get-MemberSearchY $Frame $probeShot
-  $looksLikeGroup = [bool]($score.GroupPanelDetected -or $memberSearchY -gt 0)
-  Write-TraceStage ("current-page-group-probe looksLikeGroup=" + $looksLikeGroup + " memberSearchY=" + $memberSearchY + " score=" + ($score | ConvertTo-Json -Compress))
-  [pscustomobject]@{
-    LooksLikeGroup = $looksLikeGroup
-    Score = $score
-    MemberSearchY = $memberSearchY
-    Shot = $probeShot
+  $probe = Get-GroupPageProbe $Frame $probeShot
+  Write-TraceStage ("current-page-group-probe looksLikeGroup=" + $probe.LooksLikeGroup + " confidence=" + $probe.Confidence + " memberSearchY=" + $probe.MemberSearchY + " memberText=" + $probe.MemberSearchText + " score=" + ($probe.Score | ConvertTo-Json -Compress))
+  $probe
+}
+
+function Wait-ForStableGroupPage($Frame, [int]$Seconds, [string]$Prefix, [int]$RequiredHits = 2) {
+  $deadline = (Get-Date).AddSeconds([Math]::Max(1, $Seconds))
+  $hits = 0
+  $attempt = 0
+  $last = $null
+  while ((Get-Date) -lt $deadline) {
+    $attempt += 1
+    $fresh = Get-MainQQWindow
+    $script:MainHandleValue = $fresh.HandleValue
+    $shot = Save-Shot $fresh ($Prefix + "-group-stability-" + $attempt + ".png")
+    [void]$shots.Add($shot)
+    $probe = Get-GroupPageProbe $fresh $shot
+    $last = $probe
+    if ($probe.LooksLikeGroup) {
+      $hits += 1
+    } else {
+      $hits = 0
+    }
+    Write-TraceStage ("stable-group-probe prefix=" + $Prefix + " attempt=" + $attempt + " hits=" + $hits + " looksLikeGroup=" + $probe.LooksLikeGroup + " confidence=" + $probe.Confidence + " memberSearchY=" + $probe.MemberSearchY + " score=" + ($probe.Score | ConvertTo-Json -Compress))
+    if ($hits -ge $RequiredHits) {
+      $probe | Add-Member -NotePropertyName Stable -NotePropertyValue $true -Force
+      return $probe
+    }
+    Start-Sleep -Milliseconds 450
   }
+  if (-not $last) {
+    $last = [pscustomobject]@{
+      LooksLikeGroup = $false
+      Confidence = "none"
+      Score = $null
+      MemberSearchY = 0
+      MemberSearchText = ""
+      MemberSearchStrong = $false
+      MemberSearchReason = "timeout"
+      Shot = ""
+    }
+  }
+  $last | Add-Member -NotePropertyName Stable -NotePropertyValue $false -Force
+  $last
 }
 
 function Assert-PrivateChat($Frame, [string]$ShotPath, [string]$ExpectedQQ) {
   $score = Get-GroupPanelScore $Frame
-  if ($score.GroupPanelDetected -or $score.Ratio -gt 0.12) {
+  $ratioLimit = 0.12
+  if ($script:LastGroupLikeShot) {
+    $ratioLimit = 0.035
+  }
+  if ($score.GroupPanelDetected -or $score.Ratio -gt $ratioLimit) {
     throw ("private chat guard refused to send; group panel still visible; score=" + ($score | ConvertTo-Json -Compress))
   }
   if ($ShotPath) {
@@ -892,6 +1000,7 @@ function Get-StoredCalibrationPoint($Calibration, [string]$Name) {
     Y = [int]$pt.y
     Name = $Name
     Anchor = $pt.anchor
+    Frame = $pt.frame
   }
 }
 
@@ -1031,13 +1140,21 @@ function Invoke-MemberSearchFromPage($MainFrame, [string]$Prefix, $Calibration =
   $searchRight = $mainLeft + $mainWidth
   $panelShot = Save-Shot $MainFrame ($Prefix + "-member-panel-before-search.png")
   [void]$shots.Add($panelShot)
+  $panelProbe = Get-GroupPageProbe $MainFrame $panelShot
   $calibratedSearch = Get-CalibratedPoint $Calibration "memberSearchInput" $MainFrame
+  if (-not $panelProbe.LooksLikeGroup -and -not $calibratedSearch) {
+    Write-TraceStage ("refuse-member-search-page-not-group " + $Prefix + " confidence=" + $panelProbe.Confidence + " memberSearchY=" + $panelProbe.MemberSearchY + " score=" + ($panelProbe.Score | ConvertTo-Json -Compress))
+    return $null
+  }
   if ($calibratedSearch) {
     $script:CalibrationUsed = $true
+    if (-not $panelProbe.LooksLikeGroup) {
+      Write-TraceStage ("member-search-using-calibrated-point-without-visual-group-proof " + $Prefix + " confidence=" + $panelProbe.Confidence)
+    }
     Write-TraceStage ("click-member-search-calibrated " + $Prefix + " x=" + $calibratedSearch.X + " y=" + $calibratedSearch.Y)
     Click-At $calibratedSearch.X $calibratedSearch.Y
   } else {
-    $memberSearchY = Get-MemberSearchY $MainFrame $panelShot
+    $memberSearchY = [int]$panelProbe.MemberSearchY
     if ($memberSearchY -gt 0) {
       $candidateSearchYs = @($memberSearchY, ($memberSearchY + 8), ($memberSearchY - 8))
       $primarySearchY = $memberSearchY
@@ -1066,7 +1183,7 @@ function Invoke-MemberSearchFromPage($MainFrame, [string]$Prefix, $Calibration =
   if (-not (Type-Digits $TargetQQ)) {
     Paste-Text $TargetQQ
   }
-  Start-Sleep -Seconds 1
+  Start-Sleep -Seconds 2
   Write-TraceStage ("close-interfering-popups " + $Prefix)
   Close-ProfilePopups
   Focus-Maximized $MainFrame.Handle
@@ -1130,7 +1247,7 @@ if ($TargetQQ) {
   $currentPageProbe = Test-CurrentPageLooksLikeGroup $main
   $groupScore = $currentPageProbe.Score
   if ($currentPageProbe.LooksLikeGroup) {
-    Write-TraceStage "try-current-member-search-before-click-group"
+    Write-TraceStage ("try-current-member-search-before-click-group confidence=" + $currentPageProbe.Confidence)
     $profile = Invoke-MemberSearchFromPage $main "02-current" $script:Calibration
     if ($profile) {
       Write-TraceStage "current-member-search-profile-opened"
@@ -1159,7 +1276,13 @@ if ($TargetQQ) {
       $groupX = $main.Left + [int]([Math]::Min(230, [Math]::Max(140, $main.Width * 0.07)))
       $groupY = $main.Top + $GroupBaseY + (($GroupRow - 1) * 95)
     }
+    $calibratedSearchForRoute = Get-CalibratedPoint $script:Calibration "memberSearchInput" $main
+    $hasCalibratedRoute = [bool]($calibratedGroup -and $calibratedSearchForRoute)
+    if ($hasCalibratedRoute) {
+      Write-TraceStage "calibrated-group-route-available"
+    }
     $groupOpened = $false
+    $lastGroupOpenProbe = $null
     for ($groupClickAttempt = 1; $groupClickAttempt -le 2 -and -not $groupOpened; $groupClickAttempt++) {
       Write-TraceStage ("click-pinned-group-after-current-search-failed attempt=" + $groupClickAttempt + " x=" + $groupX + " y=" + $groupY)
       Click-At $groupX $groupY
@@ -1169,12 +1292,15 @@ if ($TargetQQ) {
       Focus-Maximized $main.Handle
       $main = Get-MainQQWindow
       $script:MainHandleValue = $main.HandleValue
-      $probeShot = Save-Shot $main ("03-after-pinned-group-click-" + $groupClickAttempt + ".png")
-      [void]$shots.Add($probeShot)
-      $groupScore = Get-GroupPanelScore $main
-      $memberSearchY = Get-MemberSearchY $main $probeShot
-      $groupOpened = [bool]($groupScore.GroupPanelDetected -or $memberSearchY -gt 0)
-      Write-TraceStage ("pinned-group-open-probe attempt=" + $groupClickAttempt + " looksLikeGroup=" + $groupOpened + " memberSearchY=" + $memberSearchY + " score=" + ($groupScore | ConvertTo-Json -Compress))
+      $lastGroupOpenProbe = Wait-ForStableGroupPage $main 4 ("03-after-pinned-group-click-" + $groupClickAttempt) 2
+      $groupScore = $lastGroupOpenProbe.Score
+      $groupOpened = [bool]$lastGroupOpenProbe.Stable
+      if (-not $groupOpened -and $hasCalibratedRoute) {
+        Write-TraceStage ("pinned-group-visual-proof-missing-but-calibrated-route-will-continue attempt=" + $groupClickAttempt + " confidence=" + $lastGroupOpenProbe.Confidence + " memberSearchY=" + $lastGroupOpenProbe.MemberSearchY + " score=" + ($groupScore | ConvertTo-Json -Compress))
+        $groupOpened = $true
+      } else {
+        Write-TraceStage ("pinned-group-open-probe attempt=" + $groupClickAttempt + " stable=" + $lastGroupOpenProbe.Stable + " confidence=" + $lastGroupOpenProbe.Confidence + " memberSearchY=" + $lastGroupOpenProbe.MemberSearchY + " score=" + ($groupScore | ConvertTo-Json -Compress))
+      }
       if (-not $groupOpened -and $groupClickAttempt -lt 2) {
         Press-Escape
         Close-ProfilePopups
@@ -1184,7 +1310,7 @@ if ($TargetQQ) {
       }
     }
     if (-not $groupOpened) {
-      throw ("pinned group was not opened after two clicks; score=" + ($groupScore | ConvertTo-Json -Compress))
+      throw ("pinned group was not opened after two clicks; probe=" + ($lastGroupOpenProbe | ConvertTo-Json -Compress))
     }
     [void]$steps.Add("group-open-ok")
     $profile = Invoke-MemberSearchFromPage $main "04-pinned" $script:Calibration
@@ -1254,6 +1380,27 @@ if ($profile) {
   if (-not (Test-CalibrationMainFrame $script:Calibration $main)) {
     throw "profile card was not detected and calibrated send button is not valid for current QQ window size; please recalibrate"
   }
+  if ($TargetQQ) {
+    $storedFrame = $storedSend.Frame
+    if (-not $storedFrame -or $null -eq $storedFrame.left -or $null -eq $storedFrame.top -or $null -eq $storedFrame.width -or $null -eq $storedFrame.height) {
+      throw "profile card was not detected and calibrated profile frame is missing; please recalibrate"
+    }
+    $profileApprox = [pscustomobject]@{
+      Left = [int]$storedFrame.left
+      Top = [int]$storedFrame.top
+      Width = [int]$storedFrame.width
+      Height = [int]$storedFrame.height
+    }
+    $profileApproxShot = Save-Shot $profileApprox "04-profile-card-stored-calibration-area.png"
+    [void]$shots.Add($profileApproxShot)
+    Write-TraceStage "ocr-profile-stored-calibration-area"
+    try {
+      $profileOcr = Assert-ProfileQQ $profileApproxShot $TargetQQ
+      [void]$steps.Add("profile-calibrated-area-ok")
+    } catch {
+      throw ("profile card was not detected and calibrated profile area did not show target QQ; " + $_.Exception.Message)
+    }
+  }
   $script:CalibrationUsed = $true
   $sendX = $storedSend.X
   $sendY = $storedSend.Y
@@ -1293,6 +1440,12 @@ if ($Mode -eq "send") {
     Write-TraceStage "paste-warmup-message"
     Paste-Text $Message
   }
+  $main = Get-MainQQWindow
+  $script:MainHandleValue = $main.HandleValue
+  $privateBeforeEnterShot = Save-Shot $main "05-private-chat-before-enter.png"
+  [void]$shots.Add($privateBeforeEnterShot)
+  Write-TraceStage "assert-private-chat-before-enter"
+  [void](Assert-PrivateChat $main $privateBeforeEnterShot $TargetQQ)
   Write-TraceStage "press-enter"
   Press-Enter
   Start-Sleep -Seconds 1
