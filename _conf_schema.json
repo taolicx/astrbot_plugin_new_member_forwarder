@@ -83,6 +83,12 @@
     "hint": "真人开路辅助脚本最长运行时间，超过后本次新人欢迎停止。",
     "default": 65.0
   },
+  "qq_human_group_warmup_calibration_timeout_seconds": {
+    "type": "float",
+    "description": "真人开路校准超时秒数",
+    "hint": "执行“新人欢迎校准”时，每次校准流程最多等待多少秒。",
+    "default": 300.0
+  },
   "qq_human_group_warmup_post_send_delay_seconds": {
     "type": "float",
     "description": "开路成功后等待秒数",
@@ -98,8 +104,8 @@
   "qq_human_group_warmup_debug_dir": {
     "type": "string",
     "description": "真人开路调试目录",
-    "hint": "真人开路过程截图和结果文件保存位置，便于失败时排查。",
-    "default": "D:\\创建文件\\QQ窗口自动化测试"
+    "hint": "真人开路过程截图和结果文件保存位置。留空时自动保存在 AstrBot 插件数据目录；如需指定目录，请确认盘符存在。",
+    "default": ""
   },
   "delivery_limit_enabled": {
     "type": "bool",
@@ -166,7 +172,13 @@
     "description": "一图回复上传图片",
     "hint": "可在后台直接上传图片，也可私聊机器人发送“添加一图回复图片”后再发图片录入。",
     "default": [],
-    "file_types": ["png", "jpg", "jpeg", "webp", "gif"]
+    "file_types": [
+      "png",
+      "jpg",
+      "jpeg",
+      "webp",
+      "gif"
+    ]
   },
   "one_image_reply_order": {
     "type": "string",
@@ -191,7 +203,13 @@
     "description": "两图回复上传图片",
     "hint": "可在后台直接上传图片，也可私聊机器人发送“添加两图回复图片”后再发图片录入。",
     "default": [],
-    "file_types": ["png", "jpg", "jpeg", "webp", "gif"]
+    "file_types": [
+      "png",
+      "jpg",
+      "jpeg",
+      "webp",
+      "gif"
+    ]
   },
   "two_image_reply_order": {
     "type": "string",
