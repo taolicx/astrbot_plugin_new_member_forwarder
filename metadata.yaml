@@ -2,7 +2,7 @@ name: astrbot_plugin_new_member_forwarder
 display_name: 新人入群资料转发
 desc: 新人进群后通过 QQ 桌面真人开路，再私聊发送录制好的原始聊天记录、图片和文字。
 short_desc: 新人入群私聊资料转发
-version: 1.4.66
+version: 1.4.67
 author: Codex
 repo: "https://github.com/taolicx/astrbot_plugin_new_member_forwarder"
 support_platforms:
