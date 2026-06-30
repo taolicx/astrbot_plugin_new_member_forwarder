@@ -70,6 +70,7 @@ public class NmfStable {
 
 $script:ProfileTitle = -join ([char[]](0x8d44, 0x6599, 0x5361))
 $script:NoticeTitle = -join ([char[]](0x7fa4, 0x516c, 0x544a))
+$script:LastGroupLikeShot = ""
 if (-not $Message) {
   $Message = -join ([char[]](0x6b22, 0x8fce, 0x8fdb, 0x7fa4))
 }
@@ -558,6 +559,41 @@ function Get-GroupPanelScore($Frame) {
   }
 }
 
+function Get-ImageDifferenceRatio([string]$PathA, [string]$PathB) {
+  if (-not $PathA -or -not $PathB) { return 1.0 }
+  if (-not (Test-Path -LiteralPath $PathA) -or -not (Test-Path -LiteralPath $PathB)) { return 1.0 }
+  $bmpA = $null
+  $bmpB = $null
+  try {
+    $bmpA = [System.Drawing.Bitmap]::FromFile($PathA)
+    $bmpB = [System.Drawing.Bitmap]::FromFile($PathB)
+    $width = [Math]::Min($bmpA.Width, $bmpB.Width)
+    $height = [Math]::Min($bmpA.Height, $bmpB.Height)
+    if ($width -le 0 -or $height -le 0) { return 1.0 }
+    $stepX = [Math]::Max(12, [int]($width / 90))
+    $stepY = [Math]::Max(12, [int]($height / 70))
+    $total = 0
+    $different = 0
+    for ($y = 0; $y -lt $height; $y += $stepY) {
+      for ($x = 0; $x -lt $width; $x += $stepX) {
+        $a = $bmpA.GetPixel($x, $y)
+        $b = $bmpB.GetPixel($x, $y)
+        $delta = [Math]::Abs($a.R - $b.R) + [Math]::Abs($a.G - $b.G) + [Math]::Abs($a.B - $b.B)
+        if ($delta -gt 45) { $different += 1 }
+        $total += 1
+      }
+    }
+    if ($total -le 0) { return 1.0 }
+    return ($different / [double]$total)
+  } catch {
+    Write-TraceStage ("image-diff-failed " + $_.Exception.Message)
+    return 1.0
+  } finally {
+    if ($bmpA) { $bmpA.Dispose() }
+    if ($bmpB) { $bmpB.Dispose() }
+  }
+}
+
 function Wait-ForGroupPanel($Frame, [int]$Seconds) {
   $deadline = (Get-Date).AddSeconds($Seconds)
   $last = $null
@@ -589,10 +625,34 @@ function Test-CurrentPageLooksLikeGroup($Frame) {
   }
 }
 
-function Assert-PrivateChat($Frame) {
+function Assert-PrivateChat($Frame, [string]$ShotPath, [string]$ExpectedQQ) {
   $score = Get-GroupPanelScore $Frame
   if ($score.GroupPanelDetected -or $score.Ratio -gt 0.12) {
     throw ("private chat guard refused to send; group panel still visible; score=" + ($score | ConvertTo-Json -Compress))
+  }
+  if ($ShotPath) {
+    try {
+      $ocrText = ((Read-ImageText $ShotPath) + "") -replace "\s+", ""
+      $groupHints = @("群成员", "群公告", "群主", "管理员")
+      foreach ($hint in $groupHints) {
+        if ($ocrText -like "*$hint*") {
+          throw ("private chat guard refused to send; group page OCR hint=" + $hint)
+        }
+      }
+      if ($ExpectedQQ -and $ocrText -like ("*" + $ExpectedQQ + "*")) {
+        throw ("private chat guard refused to send; target QQ still visible on possible group search page")
+      }
+    } catch {
+      if (($_.Exception.Message + "") -like "private chat guard refused*") { throw }
+      Write-TraceStage ("private-chat-ocr-guard-soft-failed " + $_.Exception.Message)
+    }
+  }
+  if ($script:LastGroupLikeShot -and $ShotPath) {
+    $diffRatio = Get-ImageDifferenceRatio $script:LastGroupLikeShot $ShotPath
+    Write-TraceStage ("private-chat-vs-group-diff-ratio=" + $diffRatio)
+    if ($diffRatio -lt 0.08) {
+      throw ("private chat guard refused to send; current page still looks like group search page; diffRatio=" + $diffRatio)
+    }
   }
   $score
 }
@@ -967,7 +1027,9 @@ function Invoke-MemberSearchFromPage($MainFrame, [string]$Prefix, $Calibration =
   Focus-Maximized $MainFrame.Handle
   $fresh = Get-MainQQWindow
   $script:MainHandleValue = $fresh.HandleValue
-  [void]$shots.Add((Save-Shot $fresh ($Prefix + "-member-search-result.png")))
+  $memberResultShot = Save-Shot $fresh ($Prefix + "-member-search-result.png")
+  [void]$shots.Add($memberResultShot)
+  $script:LastGroupLikeShot = $memberResultShot
   Write-TraceStage ("open-search-result-profile " + $Prefix)
   $calibratedResult = Get-CalibratedPoint $Calibration "searchResultFirst" $fresh
   if ($calibratedResult) {
@@ -1159,9 +1221,10 @@ $script:MainHandleValue = $main.HandleValue
 Focus-Maximized $main.Handle
 $main = Get-MainQQWindow
 $script:MainHandleValue = $main.HandleValue
-[void]$shots.Add((Save-Shot $main "05-private-chat-before-send.png"))
+$privateBeforeSendShot = Save-Shot $main "05-private-chat-before-send.png"
+[void]$shots.Add($privateBeforeSendShot)
 Write-TraceStage "assert-private-chat"
-$privateScore = Assert-PrivateChat $main
+$privateScore = Assert-PrivateChat $main $privateBeforeSendShot $TargetQQ
 [void]$steps.Add("private-chat-ok")
 
 $sent = $false
