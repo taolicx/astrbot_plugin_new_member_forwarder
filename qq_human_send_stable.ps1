@@ -682,6 +682,56 @@ function Open-SearchResultProfile($MainFrame, [int]$BaseY) {
   return $null
 }
 
+function Invoke-MemberSearchFromPage($MainFrame, [string]$Prefix) {
+  $mainLeft = [int]$MainFrame.Left
+  $mainTop = [int]$MainFrame.Top
+  $mainWidth = [int]$MainFrame.Width
+  $searchRight = $mainLeft + $mainWidth
+  $panelShot = Save-Shot $MainFrame ($Prefix + "-member-panel-before-search.png")
+  [void]$shots.Add($panelShot)
+  $memberSearchY = Get-MemberSearchY $MainFrame $panelShot
+  if ($memberSearchY -gt 0) {
+    $candidateSearchYs = @($memberSearchY, ($memberSearchY + 8), ($memberSearchY - 8))
+    $primarySearchY = $memberSearchY
+  } else {
+    $candidateSearchYs = @(($mainTop + 258), ($mainTop + 270), ($mainTop + 246), ($mainTop + 282))
+    $primarySearchY = $mainTop + 258
+  }
+  foreach ($rawSearchIconY in $candidateSearchYs) {
+    $searchIconY = [int]([Math]::Max($mainTop + 230, [Math]::Min($mainTop + 330, [int]$rawSearchIconY)))
+    foreach ($searchIconX in @(($searchRight - 31), ($searchRight - 48))) {
+      Write-TraceStage ("click-member-search " + $Prefix + " x=" + $searchIconX + " y=" + $searchIconY)
+      Click-AtFast $searchIconX $searchIconY
+    }
+    $searchInputX = [int]($searchRight - 145)
+    Write-TraceStage ("focus-member-search-input " + $Prefix + " x=" + $searchInputX + " y=" + $searchIconY)
+    Click-AtFast $searchInputX $searchIconY
+  }
+  Start-Sleep -Milliseconds 400
+  $primarySearchY = [int]([Math]::Max($mainTop + 230, [Math]::Min($mainTop + 330, [int]$primarySearchY)))
+  $searchInputX = [int]($searchRight - 145)
+  Write-TraceStage ("focus-member-search-input-final " + $Prefix + " x=" + $searchInputX + " y=" + $primarySearchY)
+  Click-At $searchInputX $primarySearchY
+  Write-TraceStage ("type-target-qq " + $Prefix)
+  Press-CtrlA-Backspace
+  if (-not (Type-Digits $TargetQQ)) {
+    Paste-Text $TargetQQ
+  }
+  Start-Sleep -Seconds 1
+  Write-TraceStage ("close-interfering-popups " + $Prefix)
+  Close-ProfilePopups
+  Focus-Maximized $MainFrame.Handle
+  $fresh = Get-MainQQWindow
+  $script:MainHandleValue = $fresh.HandleValue
+  [void]$shots.Add((Save-Shot $fresh ($Prefix + "-member-search-result.png")))
+  Write-TraceStage ("open-search-result-profile " + $Prefix)
+  $foundProfile = Open-SearchResultProfile $fresh $SearchResultBaseY
+  if (-not $foundProfile) {
+    [void]$shots.Add((Save-Shot $fresh ($Prefix + "-after-result-clicks.png")))
+  }
+  return $foundProfile
+}
+
 $shots = New-Object System.Collections.ArrayList
 $steps = New-Object System.Collections.ArrayList
 
@@ -702,24 +752,37 @@ $script:MainHandleValue = $main.HandleValue
 [void]$steps.Add("maximized")
 Write-TraceStage "maximized"
 
-# Open the configured pinned group row. The customer keeps the target group pinned as row 1.
-$groupX = $main.Left + [int]([Math]::Min(230, [Math]::Max(140, $main.Width * 0.07)))
-$groupY = $main.Top + $GroupBaseY + (($GroupRow - 1) * 95)
-Write-TraceStage ("click-pinned-group x=" + $groupX + " y=" + $groupY)
-Click-At $groupX $groupY
-Start-Sleep -Milliseconds 1200
-$main = Get-MainQQWindow
-$script:MainHandleValue = $main.HandleValue
-[void]$shots.Add((Save-Shot $main "02-after-pinned-group-click.png"))
+$profile = $null
+$usedMemberSearch = $false
 if ($TargetQQ) {
-  Write-TraceStage "verify-pinned-group-opened-once"
-  $groupScore = Get-GroupPanelScore $main
-  Write-TraceStage ("group-panel-score=" + ($groupScore | ConvertTo-Json -Compress))
-  if (-not $groupScore.GroupPanelDetected) {
-    Write-TraceStage ("group-panel-not-detected-continue-member-search score=" + ($groupScore | ConvertTo-Json -Compress))
-    [void]$shots.Add((Save-Shot $main "02b-group-panel-not-detected-continue.png"))
+  $usedMemberSearch = $true
+  Write-TraceStage "try-current-member-search-before-click-group"
+  $profile = Invoke-MemberSearchFromPage $main "02-current"
+  if ($profile) {
+    Write-TraceStage "current-member-search-profile-opened"
+    [void]$steps.Add("current-member-search-ok")
+  } else {
+    Write-TraceStage "current-member-search-no-profile"
+    Press-Escape
+    Press-CtrlA-Backspace
+    Close-ProfilePopups
+    $main = Get-MainQQWindow
+    $script:MainHandleValue = $main.HandleValue
+    Focus-Maximized $main.Handle
+
+    $groupX = $main.Left + [int]([Math]::Min(230, [Math]::Max(140, $main.Width * 0.07)))
+    $groupY = $main.Top + $GroupBaseY + (($GroupRow - 1) * 95)
+    Write-TraceStage ("click-pinned-group-after-current-search-failed x=" + $groupX + " y=" + $groupY)
+    Click-At $groupX $groupY
+    Start-Sleep -Milliseconds 1200
+    $main = Get-MainQQWindow
+    $script:MainHandleValue = $main.HandleValue
+    [void]$shots.Add((Save-Shot $main "03-after-pinned-group-click.png"))
+    $groupScore = Get-GroupPanelScore $main
+    Write-TraceStage ("group-panel-score-after-click=" + ($groupScore | ConvertTo-Json -Compress))
+    [void]$steps.Add("group-open-attempted")
+    $profile = Invoke-MemberSearchFromPage $main "04-pinned"
   }
-  [void]$steps.Add("group-open-attempted")
 } else {
   Write-TraceStage "check-group-panel-probe"
   $groupScore = Wait-ForGroupPanel $main $WaitSeconds
@@ -732,55 +795,7 @@ if ($TargetQQ) {
   Press-CtrlA-Backspace
 }
 
-$usedMemberSearch = $false
-if ($TargetQQ) {
-  $usedMemberSearch = $true
-  $mainLeft = [int]$main.Left
-  $mainTop = [int]$main.Top
-  $mainWidth = [int]$main.Width
-  $searchRight = $mainLeft + $mainWidth
-  $panelShot = Save-Shot $main "02d-member-panel-before-search.png"
-  [void]$shots.Add($panelShot)
-  $memberSearchY = Get-MemberSearchY $main $panelShot
-  if ($memberSearchY -gt 0) {
-    $candidateSearchYs = @($memberSearchY, ($memberSearchY + 8), ($memberSearchY - 8))
-    $primarySearchY = $memberSearchY
-  } else {
-    $candidateSearchYs = @(($mainTop + 258), ($mainTop + 270), ($mainTop + 246), ($mainTop + 282))
-    $primarySearchY = $mainTop + 258
-  }
-  foreach ($rawSearchIconY in $candidateSearchYs) {
-    $searchIconY = [int]([Math]::Max($mainTop + 230, [Math]::Min($mainTop + 330, [int]$rawSearchIconY)))
-    foreach ($searchIconX in @(($searchRight - 31), ($searchRight - 48))) {
-      Write-TraceStage ("click-member-search x=" + $searchIconX + " y=" + $searchIconY)
-      Click-AtFast $searchIconX $searchIconY
-    }
-    $searchInputX = [int]($searchRight - 145)
-    Write-TraceStage ("focus-member-search-input x=" + $searchInputX + " y=" + $searchIconY)
-    Click-AtFast $searchInputX $searchIconY
-  }
-  Start-Sleep -Milliseconds 400
-  $primarySearchY = [int]([Math]::Max($mainTop + 230, [Math]::Min($mainTop + 330, [int]$primarySearchY)))
-  $searchInputX = [int]($searchRight - 145)
-  Write-TraceStage ("focus-member-search-input-final x=" + $searchInputX + " y=" + $primarySearchY)
-  Click-At $searchInputX $primarySearchY
-  Write-TraceStage "type-target-qq"
-  if (-not (Type-Digits $TargetQQ)) {
-    Paste-Text $TargetQQ
-  }
-  Start-Sleep -Seconds 1
-  Write-TraceStage "close-interfering-popups"
-  Close-ProfilePopups
-  Focus-Maximized $main.Handle
-  $main = Get-MainQQWindow
-  $script:MainHandleValue = $main.HandleValue
-  [void]$shots.Add((Save-Shot $main "03-member-search-result.png"))
-  Write-TraceStage "open-search-result-profile"
-  $profile = Open-SearchResultProfile $main $SearchResultBaseY
-  if (-not $profile) {
-    [void]$shots.Add((Save-Shot $main "03b-after-result-clicks.png"))
-  }
-} else {
+if (-not $TargetQQ) {
   $memberX = $main.Left + $main.Width - 240
   $memberY = $main.Top + $MemberBaseY + (($MemberRow - 1) * 49)
   Click-At $memberX $memberY
