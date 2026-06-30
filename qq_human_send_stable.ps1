@@ -596,15 +596,23 @@ function Close-ProfilePopups {
 function Get-ProfileCandidate {
   $windows = @(Find-QQWindows | Where-Object {
     $title = $_.Title + ""
+    $mainArea = 0
+    if ($script:MainHandleValue) {
+      try {
+        $mainWindow = Find-QQWindows | Where-Object { $_.HandleValue -eq $script:MainHandleValue } | Select-Object -First 1
+        if ($mainWindow) { $mainArea = [int64]$mainWindow.Area }
+      } catch {}
+    }
     $_.Visible -and
     $_.HandleValue -ne $script:MainHandleValue -and
     $title -notlike "*$script:NoticeTitle*" -and
-    $_.Left -ge 0 -and
-    $_.Top -ge 0 -and
-    $_.Width -gt 300 -and
-    $_.Height -gt 300 -and
-    $_.Width -lt 1000 -and
-    $_.Height -lt 1100
+    $_.Left -gt -30000 -and
+    $_.Top -gt -30000 -and
+    $_.Width -gt 220 -and
+    $_.Height -gt 220 -and
+    $_.Width -lt 1800 -and
+    $_.Height -lt 1800 -and
+    ($mainArea -le 0 -or [int64]$_.Area -lt [int64]($mainArea * 0.75))
   })
   $exact = $windows | Where-Object { $_.Title -eq $script:ProfileTitle } | Select-Object -First 1
   if ($exact) { return $exact }
@@ -622,6 +630,10 @@ function Wait-ForProfile([int]$Seconds) {
     }
     Start-Sleep -Milliseconds 500
   }
+  try {
+    $candidates = @(Find-QQWindows | Where-Object { $_.Visible -and $_.HandleValue -ne $script:MainHandleValue } | Select-Object -First 8 Title,Class,Left,Top,Width,Height,Area,HandleValue)
+    Write-TraceStage ("profile-not-detected windows=" + ($candidates | ConvertTo-Json -Compress))
+  } catch {}
   throw "profile card was not detected"
 }
 
@@ -915,10 +927,10 @@ function Invoke-MemberSearchFromPage($MainFrame, [string]$Prefix, $Calibration =
     $script:CalibrationUsed = $true
     Write-TraceStage ("click-search-result-calibrated " + $Prefix + " x=" + $calibratedResult.X + " y=" + $calibratedResult.Y)
     Click-At $calibratedResult.X $calibratedResult.Y
-    $foundProfile = Wait-ForProfileQuick 900
+    $foundProfile = Wait-ForProfileQuick 1800
     if (-not $foundProfile) {
       DoubleClick-At $calibratedResult.X $calibratedResult.Y
-      $foundProfile = Wait-ForProfileQuick 1200
+      $foundProfile = Wait-ForProfileQuick 2200
     }
   } else {
     $foundProfile = Open-SearchResultProfile $fresh $SearchResultBaseY
@@ -1017,7 +1029,7 @@ if (-not $profile) {
   Write-TraceStage "wait-profile"
   $profileWaitSeconds = $WaitSeconds
   if ($TargetQQ) {
-    $profileWaitSeconds = [Math]::Min($WaitSeconds, 5)
+    $profileWaitSeconds = [Math]::Min([Math]::Max($WaitSeconds, 12), 15)
   }
   $profile = Wait-ForProfile $profileWaitSeconds
 }
