@@ -177,8 +177,50 @@ function Press-CtrlA-Backspace {
   Start-Sleep -Milliseconds 180
 }
 
+function Set-ClipboardTextSafe([string]$Text) {
+  $lastError = $null
+  for ($i = 0; $i -lt 20; $i++) {
+    try {
+      [System.Windows.Forms.Clipboard]::SetDataObject($Text, $true, 10, 120)
+      return $true
+    } catch {
+      $lastError = $_.Exception.Message
+    }
+    try {
+      [System.Windows.Forms.Clipboard]::SetText($Text)
+      return $true
+    } catch {
+      $lastError = $_.Exception.Message
+    }
+    Start-Sleep -Milliseconds (120 + ($i * 30))
+  }
+  throw ("clipboard write failed after retries: " + $lastError)
+}
+
+function Type-Digits([string]$Text) {
+  if ($Text -notmatch '^[0-9]+$') {
+    return $false
+  }
+  foreach ($ch in $Text.ToCharArray()) {
+    $vk = 0x30 + [int]([string]$ch)
+    [NmfStable]::keybd_event([byte]$vk, 0, 0, [UIntPtr]::Zero)
+    Start-Sleep -Milliseconds 35
+    [NmfStable]::keybd_event([byte]$vk, 0, 2, [UIntPtr]::Zero)
+    Start-Sleep -Milliseconds 45
+  }
+  Start-Sleep -Milliseconds 260
+  return $true
+}
+
 function Paste-Text([string]$Text) {
-  [System.Windows.Forms.Clipboard]::SetText($Text)
+  try {
+    [void](Set-ClipboardTextSafe $Text)
+  } catch {
+    if (Type-Digits $Text) {
+      return
+    }
+    throw
+  }
   Start-Sleep -Milliseconds 120
   [NmfStable]::keybd_event(0x11, 0, 0, [UIntPtr]::Zero)
   [NmfStable]::keybd_event(0x56, 0, 0, [UIntPtr]::Zero)
