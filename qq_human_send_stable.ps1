@@ -712,22 +712,12 @@ $main = Get-MainQQWindow
 $script:MainHandleValue = $main.HandleValue
 [void]$shots.Add((Save-Shot $main "02-after-pinned-group-click.png"))
 if ($TargetQQ) {
-  Write-TraceStage "verify-pinned-group-opened"
-  $groupScore = Wait-ForGroupPanel $main 3
+  Write-TraceStage "verify-pinned-group-opened-once"
+  $groupScore = Get-GroupPanelScore $main
   Write-TraceStage ("group-panel-score=" + ($groupScore | ConvertTo-Json -Compress))
   if (-not $groupScore.GroupPanelDetected) {
-    Write-TraceStage ("retry-click-pinned-group x=" + $groupX + " y=" + $groupY)
-    Click-At $groupX $groupY
-    Start-Sleep -Milliseconds 1200
-    $main = Get-MainQQWindow
-    $script:MainHandleValue = $main.HandleValue
-    [void]$shots.Add((Save-Shot $main "02b-after-pinned-group-retry.png"))
-    $groupScore = Wait-ForGroupPanel $main 3
-    Write-TraceStage ("group-panel-retry-score=" + ($groupScore | ConvertTo-Json -Compress))
-  }
-  if (-not $groupScore.GroupPanelDetected) {
     Write-TraceStage ("group-panel-not-detected-continue-member-search score=" + ($groupScore | ConvertTo-Json -Compress))
-    [void]$shots.Add((Save-Shot $main "02c-group-panel-not-detected-continue.png"))
+    [void]$shots.Add((Save-Shot $main "02b-group-panel-not-detected-continue.png"))
   }
   [void]$steps.Add("group-open-attempted")
 } else {
