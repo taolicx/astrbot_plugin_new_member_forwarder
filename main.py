@@ -1,5 +1,4 @@
 import asyncio
-import base64
 import json
 import os
 import re
@@ -31,7 +30,7 @@ class TempSessionNotReadyError(RuntimeError):
     PLUGIN_NAME,
     "Codex",
     "管理员私聊录制新人入群资料，新人进群时自动私聊转发文字、图片和聊天记录。",
-    "1.4.23",
+    "1.4.24",
 )
 class NewMemberForwarderPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig | None = None):
@@ -1410,6 +1409,38 @@ class NewMemberForwarderPlugin(Star):
         window = max(3.0, self._get_float("qq_desktop_warmup_sent_window_seconds", 180.0))
         return bool(last_at and time.time() - last_at <= window)
 
+    def _run_powershell_sta_script_file(
+        self,
+        script: str,
+        env: dict[str, str],
+        timeout: float,
+        script_name: str,
+    ) -> subprocess.CompletedProcess[str]:
+        runtime_dir = self.data_dir / "runtime_scripts"
+        runtime_dir.mkdir(parents=True, exist_ok=True)
+        script_path = runtime_dir / script_name
+        script_path.write_text(script, encoding="utf-8-sig")
+        command = [
+            "powershell.exe",
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-STA",
+            "-File",
+            str(script_path),
+        ]
+        return subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=env,
+            timeout=timeout,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+
     def _run_qq_human_group_warmup_script(
         self,
         group_id: str,
@@ -1949,26 +1980,11 @@ Out-Result $false 'target_member_or_send_message_button_not_found' 'target'
                 ),
             }
         )
-        encoded = base64.b64encode(script.encode("utf-16le")).decode("ascii")
-        command = [
-            "powershell.exe",
-            "-NoProfile",
-            "-NonInteractive",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-STA",
-            "-EncodedCommand",
-            encoded,
-        ]
-        completed = subprocess.run(
-            command,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            env=env,
-            timeout=timeout,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        completed = self._run_powershell_sta_script_file(
+            script,
+            env,
+            timeout,
+            "human_group_warmup.ps1",
         )
         stdout = (completed.stdout or "").strip()
         stderr = (completed.stderr or "").strip()
@@ -2228,26 +2244,11 @@ Out-Result $false 'target_qq_window_or_send_button_not_found' 'wait'
                 ),
             }
         )
-        encoded = base64.b64encode(script.encode("utf-16le")).decode("ascii")
-        command = [
-            "powershell.exe",
-            "-NoProfile",
-            "-NonInteractive",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-STA",
-            "-EncodedCommand",
-            encoded,
-        ]
-        completed = subprocess.run(
-            command,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            env=env,
-            timeout=timeout,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        completed = self._run_powershell_sta_script_file(
+            script,
+            env,
+            timeout,
+            "desktop_warmup.ps1",
         )
         stdout = (completed.stdout or "").strip()
         stderr = (completed.stderr or "").strip()
