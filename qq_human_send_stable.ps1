@@ -744,12 +744,30 @@ function Read-Calibration([string]$Path) {
   return $null
 }
 
+function Test-CalibrationMainFrame($Calibration, $Frame) {
+  if (-not $Calibration -or -not $Calibration.main -or -not $Frame) { return $true }
+  $main = $Calibration.main
+  if ($null -eq $main.width -or $null -eq $main.height) { return $true }
+  $widthDelta = [Math]::Abs([int]$main.width - [int]$Frame.Width)
+  $heightDelta = [Math]::Abs([int]$main.height - [int]$Frame.Height)
+  $leftDelta = 0
+  $topDelta = 0
+  if ($null -ne $main.left) { $leftDelta = [Math]::Abs([int]$main.left - [int]$Frame.Left) }
+  if ($null -ne $main.top) { $topDelta = [Math]::Abs([int]$main.top - [int]$Frame.Top) }
+  $ok = ($widthDelta -le 180 -and $heightDelta -le 180 -and $leftDelta -le 180 -and $topDelta -le 180)
+  if (-not $ok) {
+    Write-TraceStage ("calibration-main-frame-mismatch widthDelta=" + $widthDelta + " heightDelta=" + $heightDelta + " leftDelta=" + $leftDelta + " topDelta=" + $topDelta)
+  }
+  return $ok
+}
+
 function Get-CalibratedPoint($Calibration, [string]$Name, $Frame) {
   if (-not $Calibration -or -not $Calibration.points) { return $null }
   $prop = $Calibration.points.PSObject.Properties[$Name]
   if (-not $prop) { return $null }
   $pt = $prop.Value
   if ($null -eq $pt.relativeX -or $null -eq $pt.relativeY) { return $null }
+  if (($pt.anchor + "") -eq "main" -and -not (Test-CalibrationMainFrame $Calibration $Frame)) { return $null }
   [pscustomobject]@{
     X = [int]([Math]::Round($Frame.Left + ([double]$Frame.Width * [double]$pt.relativeX)))
     Y = [int]([Math]::Round($Frame.Top + ([double]$Frame.Height * [double]$pt.relativeY)))
@@ -786,7 +804,7 @@ function Wait-CalibratedCursorPoint($Frame, [string]$Name, [string]$Anchor, [str
   $label.Dock = "Fill"
   $label.Font = New-Object System.Drawing.Font("Microsoft YaHei UI", 11)
   $label.Padding = New-Object System.Windows.Forms.Padding(14)
-  $label.Text = ($Title + "`r`n`r`n" + $Instruction + "`r`n`r`nMove mouse to the target point, press F8 to record, or press ESC to cancel. This window can be dragged.")
+  $label.Text = ($Title + "`r`n`r`n" + $Instruction + "`r`n`r`n把鼠标移动到目标位置，按 F8 记录，按 ESC 取消。这个提示窗可以拖动。")
   $form.Controls.Add($label)
   [void]$form.Show()
   $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
@@ -1034,15 +1052,34 @@ if ($TargetQQ) {
       $groupX = $main.Left + [int]([Math]::Min(230, [Math]::Max(140, $main.Width * 0.07)))
       $groupY = $main.Top + $GroupBaseY + (($GroupRow - 1) * 95)
     }
-    Write-TraceStage ("click-pinned-group-after-current-search-failed x=" + $groupX + " y=" + $groupY)
-    Click-At $groupX $groupY
-    Start-Sleep -Milliseconds 1200
-    $main = Get-MainQQWindow
-    $script:MainHandleValue = $main.HandleValue
-    [void]$shots.Add((Save-Shot $main "03-after-pinned-group-click.png"))
-    $groupScore = Get-GroupPanelScore $main
-    Write-TraceStage ("group-panel-score-after-click=" + ($groupScore | ConvertTo-Json -Compress))
-    [void]$steps.Add("group-open-attempted")
+    $groupOpened = $false
+    for ($groupClickAttempt = 1; $groupClickAttempt -le 2 -and -not $groupOpened; $groupClickAttempt++) {
+      Write-TraceStage ("click-pinned-group-after-current-search-failed attempt=" + $groupClickAttempt + " x=" + $groupX + " y=" + $groupY)
+      Click-At $groupX $groupY
+      Start-Sleep -Milliseconds 1200
+      $main = Get-MainQQWindow
+      $script:MainHandleValue = $main.HandleValue
+      Focus-Maximized $main.Handle
+      $main = Get-MainQQWindow
+      $script:MainHandleValue = $main.HandleValue
+      $probeShot = Save-Shot $main ("03-after-pinned-group-click-" + $groupClickAttempt + ".png")
+      [void]$shots.Add($probeShot)
+      $groupScore = Get-GroupPanelScore $main
+      $memberSearchY = Get-MemberSearchY $main $probeShot
+      $groupOpened = [bool]($groupScore.GroupPanelDetected -or $memberSearchY -gt 0)
+      Write-TraceStage ("pinned-group-open-probe attempt=" + $groupClickAttempt + " looksLikeGroup=" + $groupOpened + " memberSearchY=" + $memberSearchY + " score=" + ($groupScore | ConvertTo-Json -Compress))
+      if (-not $groupOpened -and $groupClickAttempt -lt 2) {
+        Press-Escape
+        Close-ProfilePopups
+        $main = Get-MainQQWindow
+        $script:MainHandleValue = $main.HandleValue
+        Focus-Maximized $main.Handle
+      }
+    }
+    if (-not $groupOpened) {
+      throw ("pinned group was not opened after two clicks; score=" + ($groupScore | ConvertTo-Json -Compress))
+    }
+    [void]$steps.Add("group-open-ok")
     $profile = Invoke-MemberSearchFromPage $main "04-pinned" $script:Calibration
   }
 } else {
@@ -1106,6 +1143,9 @@ if ($profile) {
   $storedSend = Get-StoredCalibrationPoint $script:Calibration "profileSendButton"
   if (-not $storedSend) {
     throw "profile card was not detected and no calibrated send button is available"
+  }
+  if (-not (Test-CalibrationMainFrame $script:Calibration $main)) {
+    throw "profile card was not detected and calibrated send button is not valid for current QQ window size; please recalibrate"
   }
   $script:CalibrationUsed = $true
   $sendX = $storedSend.X
