@@ -29,8 +29,8 @@ class TempSessionNotReadyError(RuntimeError):
 @register(
     PLUGIN_NAME,
     "Codex",
-    "管理员私聊录制新人入群资料，新人进群时自动私聊转发文字、图片和聊天记录。",
-    "1.4.40",
+    "????????????????????????????????????",
+    "1.4.41",
 )
 class NewMemberForwarderPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig | None = None):
@@ -83,30 +83,30 @@ class NewMemberForwarderPlugin(Star):
                 "items": [],
             }
             yield event.plain_result(
-                "已开始录制新人资料。\n"
-                "接下来请直接私聊发送要转发给新人的内容：文字、图片、合并聊天记录都可以。\n"
-                "发送“结束”保存，发送“取消”放弃。"
+                "??????????\n"
+                "????????????????????????????????????\n"
+                "??????????????????"
             )
             return
 
         if text in self._cancel_words():
             if self._recording_sessions.pop(sender_id, None) is not None:
-                yield event.plain_result("已取消本次录制，未覆盖已保存资料。")
+                yield event.plain_result("?????????????????")
             elif self._image_reply_recording_sessions.pop(sender_id, None) is not None:
-                yield event.plain_result("已取消添加图片回复。")
+                yield event.plain_result("??????????")
             else:
-                yield event.plain_result("当前没有正在录制的内容。")
+                yield event.plain_result("????????????")
             return
 
         if text in self._end_words():
             session = self._recording_sessions.pop(sender_id, None)
             if not session:
-                yield event.plain_result("当前没有正在录制的内容。先发送“开始”。")
+                yield event.plain_result("????????????????????")
                 return
 
             items = session.get("items") or []
             if not items:
-                yield event.plain_result("本次没有录到任何内容，已取消保存。")
+                yield event.plain_result("?????????????????")
                 return
 
             payload = {
@@ -116,19 +116,19 @@ class NewMemberForwarderPlugin(Star):
                 "items": items,
             }
             self._save_recorded_payload(payload)
-            yield event.plain_result(f"已保存新人资料，共 {len(items)} 条发送项。新人入群后会自动私聊发送。")
+            yield event.plain_result(f"????????? {len(items)} ??????????????????")
             return
 
         if text in self._status_words():
             saved_count = len(self._load_recorded_payload().get("items") or [])
             current_count = len((self._recording_sessions.get(sender_id) or {}).get("items") or [])
-            recording = "是" if sender_id in self._recording_sessions else "否"
+            recording = "?" if sender_id in self._recording_sessions else "?"
             yield event.plain_result(
-                f"正在录制：{recording}\n"
-                f"本次已录：{current_count} 条\n"
-                f"已保存资料：{saved_count} 条\n"
-                f"正在添加图片回复：{'是' if sender_id in self._image_reply_recording_sessions else '否'}\n"
-                f"存储位置：{self.record_file}"
+                f"?????{recording}\n"
+                f"?????{current_count} ?\n"
+                f"??????{saved_count} ?\n"
+                f"?????????{'?' if sender_id in self._image_reply_recording_sessions else '?'}\n"
+                f"?????{self.record_file}"
             )
             return
 
@@ -141,7 +141,7 @@ class NewMemberForwarderPlugin(Star):
                     "items": [],
                 }
             )
-            yield event.plain_result("已清空已保存的新人资料。")
+            yield event.plain_result("????????????")
             return
 
         session = self._recording_sessions.get(sender_id)
@@ -153,15 +153,15 @@ class NewMemberForwarderPlugin(Star):
             captured_items = await self._capture_event_items(event, bot)
         except Exception as exc:
             logger.exception("new_member_forwarder: capture material failed: %s", exc)
-            yield event.plain_result(f"这条内容录制失败：{exc}")
+            yield event.plain_result(f"?????????{exc}")
             return
 
         if not captured_items:
-            yield event.plain_result("这条消息没有可保存的文字、图片或聊天记录。")
+            yield event.plain_result("?????????????????????")
             return
 
         session["items"].extend(captured_items)
-        yield event.plain_result(f"已录入 {len(captured_items)} 条发送项，当前共 {len(session['items'])} 条。")
+        yield event.plain_result(f"??? {len(captured_items)} ???????? {len(session['items'])} ??")
 
     @filter.platform_adapter_type(filter.PlatformAdapterType.AIOCQHTTP)
     @filter.event_message_type(filter.EventMessageType.ALL)
@@ -221,7 +221,7 @@ class NewMemberForwarderPlugin(Star):
                 self._release_delivery_slot(delivery_slot_key)
 
     @filter.platform_adapter_type(filter.PlatformAdapterType.AIOCQHTTP)
-    @filter.command("新人欢迎测试")
+    @filter.command("??????")
     async def test_delivery(self, event: AstrMessageEvent, target_qq: str = "", source_group_id: str = ""):
         if not self._can_run_admin_or_self_command(event):
             return
@@ -270,29 +270,29 @@ class NewMemberForwarderPlugin(Star):
         user_id = self._string(target_qq or event.get_sender_id())
         group_id = self._string(source_group_id or event.get_group_id())
         if not user_id.isdigit() or not group_id.isdigit():
-            return "用法：/新人欢迎测试 QQ号 来源群号"
+            return "???/?????? QQ? ????"
         payload = self._load_recorded_payload()
         items = payload.get("items") or []
         if not items:
-            return "还没有保存新人资料。请私聊发送“开始”录制。"
+            return "??????????????????????"
 
         bot = getattr(event, "bot", None)
         if not bot:
-            return "当前事件没有 OneBot bot 实例，无法测试发送。"
+            return "?????? OneBot bot ??????????"
 
         self._test_delivery_running_until = time.time() + 300.0
         try:
             await self._deliver_private_with_retries(bot, user_id, items, event.get_self_id(), group_id)
         except Exception as exc:
             logger.exception("new_member_forwarder: test delivery failed: %s", exc)
-            return f"测试发送失败：{self._short_error(exc, 220)}"
+            return f"???????{self._short_error(exc, 220)}"
         finally:
             self._test_delivery_running_until = time.time() + 5.0
 
-        return f"已私聊 QQ {user_id} 执行一次测试发送。"
+        return f"??? QQ {user_id} ?????????"
 
     @filter.platform_adapter_type(filter.PlatformAdapterType.AIOCQHTTP)
-    @filter.command("新人欢迎开路测试")
+    @filter.command("????????")
     async def test_warmup_delivery(self, event: AstrMessageEvent, target_qq: str = "", source_group_id: str = ""):
         if not self._is_admin(self._string(event.get_sender_id())):
             return
@@ -300,20 +300,20 @@ class NewMemberForwarderPlugin(Star):
         user_id = self._string(target_qq or event.get_sender_id())
         group_id = self._string(source_group_id or event.get_group_id())
         if not user_id.isdigit() or not group_id.isdigit():
-            yield event.plain_result("用法：/新人欢迎开路测试 QQ号 来源群号")
+            yield event.plain_result("???/???????? QQ? ????")
             return
 
         ok = await self._send_qq_human_group_warmup_message_queued(group_id, user_id, force=True)
         if ok:
-            yield event.plain_result(f"真人开路已执行：QQ {user_id}，来源群 {group_id}。")
+            yield event.plain_result(f"????????QQ {user_id}???? {group_id}?")
             return
         result = self._qq_human_group_warmup_results.get(f"{group_id}:{user_id}") or {}
         reason = self._string(result.get("reason")) or "unknown"
         stage = self._string(result.get("stage")) or "-"
-        yield event.plain_result(f"真人开路未成功执行：stage={stage}，reason={reason}")
+        yield event.plain_result(f"??????????stage={stage}?reason={reason}")
 
     @filter.platform_adapter_type(filter.PlatformAdapterType.AIOCQHTTP)
-    @filter.command("新人欢迎真人开路测试")
+    @filter.command("??????????")
     async def test_human_group_warmup_delivery(
         self,
         event: AstrMessageEvent,
@@ -325,12 +325,12 @@ class NewMemberForwarderPlugin(Star):
 
         user_id = self._string(target_qq or event.get_sender_id())
         group_id = self._string(source_group_id or event.get_group_id())
-        text = self._string(self._get("forward_warmup_message_text", "欢迎进群")).strip()
+        text = self._string(self._get("forward_warmup_message_text", "????")).strip()
         if not text:
-            yield event.plain_result("真人开路消息为空，请先在后台设置 forward_warmup_message_text。")
+            yield event.plain_result("???????????????? forward_warmup_message_text?")
             return
         if not user_id.isdigit() or not group_id.isdigit():
-            yield event.plain_result("用法：/新人欢迎真人开路测试 QQ号 来源群号")
+            yield event.plain_result("???/?????????? QQ? ????")
             return
 
         ok = await self._send_qq_human_group_warmup_message_queued(
@@ -339,33 +339,33 @@ class NewMemberForwarderPlugin(Star):
             force=True,
         )
         if ok:
-            yield event.plain_result(f"真人开路已执行：QQ {user_id}，来源群 {group_id}。")
+            yield event.plain_result(f"????????QQ {user_id}???? {group_id}?")
         else:
             result = self._qq_human_group_warmup_results.get(f"{group_id}:{user_id}") or {}
             reason = self._string(result.get("reason")) or "unknown"
             stage = self._string(result.get("stage")) or "-"
-            yield event.plain_result(f"真人开路未成功执行：stage={stage}，reason={reason}")
+            yield event.plain_result(f"??????????stage={stage}?reason={reason}")
 
     @filter.platform_adapter_type(filter.PlatformAdapterType.AIOCQHTTP)
-    @filter.command("添加一图回复图片", alias={"设置一图回复图片", "录入一图回复图片"})
+    @filter.command("????????", alias={"????????", "????????"})
     async def add_one_image_reply_asset(self, event: AstrMessageEvent):
         async for result in self._add_image_reply_asset_command(event, "one"):
             yield result
 
     @filter.platform_adapter_type(filter.PlatformAdapterType.AIOCQHTTP)
-    @filter.command("添加两图回复图片", alias={"设置两图回复图片", "录入两图回复图片"})
+    @filter.command("????????", alias={"????????", "????????"})
     async def add_two_image_reply_asset(self, event: AstrMessageEvent):
         async for result in self._add_image_reply_asset_command(event, "two"):
             yield result
 
     @filter.platform_adapter_type(filter.PlatformAdapterType.AIOCQHTTP)
-    @filter.command("删除一图回复图片", alias={"移除一图回复图片"})
+    @filter.command("????????", alias={"????????"})
     async def delete_one_image_reply_asset(self, event: AstrMessageEvent):
         async for result in self._delete_image_reply_asset_command(event, "one"):
             yield result
 
     @filter.platform_adapter_type(filter.PlatformAdapterType.AIOCQHTTP)
-    @filter.command("删除两图回复图片", alias={"移除两图回复图片"})
+    @filter.command("????????", alias={"????????"})
     async def delete_two_image_reply_asset(self, event: AstrMessageEvent):
         async for result in self._delete_image_reply_asset_command(event, "two"):
             yield result
@@ -391,7 +391,7 @@ class NewMemberForwarderPlugin(Star):
             if text in self._cancel_words() or self._is_image_reply_command_text(text):
                 return
             if not image_segments:
-                yield event.plain_result("这条没有识别到图片。请直接发送图片；发送“取消”可取消。")
+                yield event.plain_result("????????????????????????????")
                 return
             rule_kind = self._string(self._image_reply_recording_sessions.get(sender_id, {}).get("rule_kind"))
             if rule_kind not in {"one", "two"}:
@@ -399,11 +399,11 @@ class NewMemberForwarderPlugin(Star):
                 return
             asset = await self._extract_image_reply_asset(image_segments)
             if not asset:
-                yield event.plain_result("这条图片保存失败，请重新发送图片。")
+                yield event.plain_result("?????????????????")
                 return
             self._image_reply_recording_sessions.pop(sender_id, None)
             self._save_image_reply_asset(rule_kind, asset)
-            yield event.plain_result(f"已添加{self._image_rule_label(rule_kind)}回复图片。")
+            yield event.plain_result(f"???{self._image_rule_label(rule_kind)}?????")
             return
 
         if sender_id in self._recording_sessions:
@@ -479,7 +479,7 @@ class NewMemberForwarderPlugin(Star):
     def _should_send_warmup_message(self, items: list[dict[str, Any]]) -> bool:
         if not self._get_bool("forward_warmup_message_enabled", True):
             return False
-        if not self._string(self._get("forward_warmup_message_text", "欢迎进群")).strip():
+        if not self._string(self._get("forward_warmup_message_text", "????")).strip():
             return False
         for item in items:
             if not isinstance(item, dict):
@@ -498,8 +498,8 @@ class NewMemberForwarderPlugin(Star):
         self_id: str = "",
         group_id: str = "",
     ) -> None:
-        raise RuntimeError("旧 API 普通文字开路链路已停用")
-        text = self._string(self._get("forward_warmup_message_text", "欢迎进群")).strip()
+        raise RuntimeError("? API ???????????")
+        text = self._string(self._get("forward_warmup_message_text", "????")).strip()
         if not text:
             return
         try:
@@ -535,7 +535,7 @@ class NewMemberForwarderPlugin(Star):
         self_id: str = "",
         group_id: str = "",
     ) -> None:
-        raise RuntimeError("旧 API 普通文字开路链路已停用")
+        raise RuntimeError("? API ???????????")
         retry_delays = self._get_float_list("temp_session_retry_delays_seconds", [3.0, 8.0])
         attempt = 0
         while True:
@@ -568,8 +568,8 @@ class NewMemberForwarderPlugin(Star):
         self_id: str = "",
         group_id: str = "",
     ) -> None:
-        raise RuntimeError("旧 source node 开路链路已停用")
-        text = self._string(self._get("forward_warmup_message_text", "欢迎进群")).strip()
+        raise RuntimeError("? source node ???????")
+        text = self._string(self._get("forward_warmup_message_text", "????")).strip()
         if not text:
             return
 
@@ -601,7 +601,7 @@ class NewMemberForwarderPlugin(Star):
         self_id: str = "",
         group_id: str = "",
     ) -> None:
-        raise RuntimeError("旧 source node 开路链路已停用")
+        raise RuntimeError("? source node ???????")
         retry_delays = self._get_float_list("temp_session_retry_delays_seconds", [3.0, 8.0])
         attempt = 0
         while True:
@@ -804,20 +804,20 @@ class NewMemberForwarderPlugin(Star):
                 continue
             kind = self._string(item.get("kind"))
             if kind in {"forward_id", "forward"} and not self._forward_item_forward_id(item):
-                raise RuntimeError("录制的聊天记录缺少原始转发编号，请重新录制这条聊天记录")
+                raise RuntimeError("???????????????????????????")
 
         group_id = self._string(group_id)
         user_id = self._string(user_id)
         if not group_id.isdigit():
-            raise RuntimeError("缺少来源群号，无法执行真人开路")
+            raise RuntimeError("???????????????")
         if not user_id.isdigit():
-            raise RuntimeError("目标 QQ 号无效，无法执行真人开路")
+            raise RuntimeError("?? QQ ????????????")
 
         if not await self._send_qq_human_group_warmup_message(group_id, user_id):
             result = self._qq_human_group_warmup_results.get(f"{group_id}:{user_id}") or {}
             stage = self._string(result.get("stage")) or "-"
-            reason = self._string(result.get("reason")) or "真人开路未成功发送"
-            raise RuntimeError(f"真人开路失败：stage={stage}，reason={reason}")
+            reason = self._string(result.get("reason")) or "?????????"
+            raise RuntimeError(f"???????stage={stage}?reason={reason}")
 
         for item in items:
             if not isinstance(item, dict):
@@ -885,7 +885,7 @@ class NewMemberForwarderPlugin(Star):
     ) -> None:
         forward_id = self._forward_item_forward_id(item)
         if not forward_id:
-            raise RuntimeError("录制的聊天记录缺少原始转发编号，请重新录制这条聊天记录")
+            raise RuntimeError("???????????????????????????")
         await self._send_original_forward(bot, user_id, forward_id, self_id, group_id)
         logger.info(
             "new_member_forwarder: sent recorded original forward segment to user %s in group %s.",
@@ -903,7 +903,7 @@ class NewMemberForwarderPlugin(Star):
         *,
         source_kind: str,
     ) -> bool:
-        raise RuntimeError("旧 source node 转发链路已停用")
+        raise RuntimeError("? source node ???????")
         if not self._string(message_id):
             return False
         values = self._id_variants(message_id)
@@ -954,9 +954,9 @@ class NewMemberForwarderPlugin(Star):
         if not self._get_bool("llbot_status_checked_forward", True):
             return {}
         options = {
-            "source": self._string(self._get("forward_card_source", "聊天记录")).strip(),
-            "summary": self._string(self._get("forward_card_summary", "查看转发消息")).strip(),
-            "prompt": self._string(self._get("forward_card_prompt", "[聊天记录]")).strip(),
+            "source": self._string(self._get("forward_card_source", "????")).strip(),
+            "summary": self._string(self._get("forward_card_summary", "??????")).strip(),
+            "prompt": self._string(self._get("forward_card_prompt", "[????]")).strip(),
         }
         return {key: value for key, value in options.items() if value}
 
@@ -989,7 +989,7 @@ class NewMemberForwarderPlugin(Star):
         user_id: str,
         self_id: str = "",
     ) -> None:
-        raise TempSessionNotReadyError("旧临时会话准备链路已停用")
+        raise TempSessionNotReadyError("????????????")
         retry_delays = self._get_float_list("temp_session_retry_delays_seconds", [3.0, 8.0])
         for attempt in range(len(retry_delays) + 1):
             if await self._prepare_private_context(bot, group_id, user_id, self_id):
@@ -1141,7 +1141,7 @@ class NewMemberForwarderPlugin(Star):
     ) -> bool:
         if not force and not self._get_bool("qq_human_group_warmup_enabled", False):
             return False
-        text = self._string(self._get("forward_warmup_message_text", "欢迎进群")).strip()
+        text = self._string(self._get("forward_warmup_message_text", "????")).strip()
         if not text:
             return False
         group_id = self._string(group_id)
@@ -1271,7 +1271,7 @@ class NewMemberForwarderPlugin(Star):
         return False
         if not self._get_bool("qq_desktop_warmup_enabled", False):
             return False
-        text = self._string(self._get("forward_warmup_message_text", "欢迎进群")).strip()
+        text = self._string(self._get("forward_warmup_message_text", "????")).strip()
         if not text:
             return False
         group_id = self._string(group_id)
@@ -1458,6 +1458,8 @@ class NewMemberForwarderPlugin(Star):
             str(max(3, int(self._get_float("qq_human_group_warmup_wait_seconds", 20.0)))),
             "-OutDir",
             str(out_dir),
+            "-TraceFile",
+            str(trace_path),
         ]
         try:
             completed = subprocess.run(
@@ -1993,10 +1995,10 @@ try {
             self._string(
                 self._get(
                     "qq_human_group_warmup_debug_dir",
-                    r"D:\创建文件\QQ窗口自动化测试",
+                    r"D:\????\QQ???????",
                 )
             )
-            or r"D:\创建文件\QQ窗口自动化测试"
+            or r"D:\????\QQ???????"
         )
         out_dir = debug_base / f"plugin-{time.strftime('%Y%m%d-%H%M%S')}-{group_id}-{user_id}"
         try:
@@ -2356,7 +2358,7 @@ function Get-QQWindowSortKey($win) {
     $area = [int]($rect.Width * $rect.Height)
     $name = Get-ElementName $win
     $bonus = 0
-    if ($name -notmatch '资料卡|Profile') { $bonus += 100000000 }
+    if ($name -notmatch '???|Profile') { $bonus += 100000000 }
     if ($rect.Width -ge 600 -and $rect.Height -ge 450) { $bonus += 50000000 }
     return $bonus + $area
   } catch {}
@@ -2479,7 +2481,7 @@ function Find-SearchEdit($root) {
         $ctype = $item.Current.ControlType.ProgrammaticName + ''
         if ($ctype -match 'Edit|Document') { $score += 20 }
       } catch {}
-      if ($text -match '搜索|查找|Search|search') { $score += 40 }
+      if ($text -match '??|??|Search|search') { $score += 40 }
       if ($score -le 0) { continue }
       try {
         $rect = $item.Current.BoundingRectangle
@@ -2512,10 +2514,10 @@ function Find-NamedButton($root, [string]$regex) {
 function Close-UnsupportedQQDialog {
   $closed = $false
   foreach ($win in (Get-QQWindows)) {
-    $isUnsupported = Element-Has-Hint $win @('QQ版本不支持', '不支持本功能', '请尝试下载最新版本', '手机端查看')
+    $isUnsupported = Element-Has-Hint $win @('QQ?????', '??????', '?????????', '?????')
     if (-not $isUnsupported) { continue }
     Focus-Window $win | Out-Null
-    $button = Find-NamedButton $win '确定|知道了|关闭|OK|Ok|ok'
+    $button = Find-NamedButton $win '??|???|??|OK|Ok|ok'
     if ($button -ne $null) {
       if (Invoke-Element $button $false) {
         Start-Sleep -Milliseconds 400
@@ -2683,7 +2685,7 @@ function Try-SearchTargetInGroup($groupWin, [string]$targetName, [string]$target
 function Find-SendButton($root, [string]$buttonRegex) {
   try {
     Write-Stage 'scan_send_button'
-    foreach ($name in @('发消息', '发送消息', '聊天', '私聊')) {
+    foreach ($name in @('???', '????', '??', '??')) {
       try {
         $cond = New-Object System.Windows.Automation.PropertyCondition -ArgumentList ([System.Windows.Automation.AutomationElement]::NameProperty, $name)
         $direct = $root.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $cond)
@@ -2751,7 +2753,7 @@ function Click-At([int]$x, [int]$y) {
 function Try-ClickProfileSendButtonByCoordinate([string]$text) {
   foreach ($win in (Get-QQWindows)) {
     $name = Get-ElementName $win
-    if ($name -notmatch '资料卡|Profile') { continue }
+    if ($name -notmatch '???|Profile') { continue }
     $profileHandle = Get-NativeWindowHandleValue $win
     try {
       $rect = $win.Current.BoundingRectangle
@@ -3428,18 +3430,18 @@ Out-Result $false 'target_qq_window_or_send_button_not_found' 'wait'
         if not sender_id or not self._is_admin(sender_id):
             return
         if self._event_group_id(event):
-            yield event.plain_result("请私聊我添加图片回复。")
+            yield event.plain_result("???????????")
             return
 
         image_segments = self._image_segments_from_event(event)
         if image_segments:
             asset = await self._extract_image_reply_asset(image_segments)
             if not asset:
-                yield event.plain_result("这条图片保存失败，请重新发送图片。")
+                yield event.plain_result("?????????????????")
                 return
             self._image_reply_recording_sessions.pop(sender_id, None)
             self._save_image_reply_asset(rule_kind, asset)
-            yield event.plain_result(f"已添加{self._image_rule_label(rule_kind)}回复图片。")
+            yield event.plain_result(f"???{self._image_rule_label(rule_kind)}?????")
             return
 
         self._image_reply_recording_sessions[sender_id] = {
@@ -3447,7 +3449,7 @@ Out-Result $false 'target_qq_window_or_send_button_not_found' 'wait'
             "started_at": int(time.time()),
         }
         yield event.plain_result(
-            f"开始添加{self._image_rule_label(rule_kind)}回复图片。请直接把图片发给我，发送“取消”可取消。"
+            f"????{self._image_rule_label(rule_kind)}?????????????????????????"
         )
 
     async def _delete_image_reply_asset_command(self, event: AstrMessageEvent, rule_kind: str):
@@ -3458,9 +3460,9 @@ Out-Result $false 'target_qq_window_or_send_button_not_found' 'wait'
         existed = assets.pop(rule_kind, None) is not None
         self._save_image_reply_assets(assets)
         yield event.plain_result(
-            f"已删除{self._image_rule_label(rule_kind)}回复图片。"
+            f"???{self._image_rule_label(rule_kind)}?????"
             if existed
-            else f"当前没有已添加的{self._image_rule_label(rule_kind)}回复图片。"
+            else f"????????{self._image_rule_label(rule_kind)}?????"
         )
 
     async def _handle_private_images(
@@ -3624,7 +3626,7 @@ Out-Result $false 'target_qq_window_or_send_button_not_found' 'wait'
         text = f"{exc}"
         lower = text.lower()
         return (
-            "发送失败，请先添加对方为好友" in text
+            "??????????????" in text
             or "please add" in lower
             or "not a friend" in lower
             or "temporary session" in lower
@@ -3759,7 +3761,7 @@ Out-Result $false 'target_qq_window_or_send_button_not_found' 'wait'
         )
 
     def _image_rule_label(self, rule_kind: str) -> str:
-        return "两图" if rule_kind == "two" else "一图"
+        return "??" if rule_kind == "two" else "??"
 
     def _ordered_text_image_items(
         self,
@@ -3770,14 +3772,14 @@ Out-Result $false 'target_qq_window_or_send_button_not_found' 'wait'
     ) -> list[tuple[str, str]]:
         aliases = {
             "text": "text",
-            "文字": "text",
+            "??": "text",
             "image": "image",
             "img": "image",
-            "图片": "image",
+            "??": "image",
         }
         ordered: list[tuple[str, str]] = []
         used: set[str] = set()
-        for key in [item for item in re.split(r"[\s,，]+", order_raw.lower()) if item]:
+        for key in [item for item in re.split(r"[\s,?]+", order_raw.lower()) if item]:
             kind = aliases.get(key)
             if kind in available and kind not in used:
                 ordered.append((kind, available[kind]))
@@ -4136,7 +4138,7 @@ Out-Result $false 'target_qq_window_or_send_button_not_found' 'wait'
         text = self._string(
             self._get(
                 "pending_delivery_notice_text",
-                "欢迎进群，请先私聊我一下，我把资料发给你。",
+                "?????????????????????",
             )
         )
         if not text:
@@ -4255,7 +4257,7 @@ Out-Result $false 'target_qq_window_or_send_button_not_found' 'wait'
 
     def _delivery_history_key(self, group_id: str, user_id: str) -> str:
         scope = self._string(self._get("delivery_limit_scope", "user")).lower()
-        if scope in {"user_group", "group_user", "group", "群", "按群", "按群分别统计", "按qq和群分别统计", "按qq+群分别统计"}:
+        if scope in {"user_group", "group_user", "group", "?", "??", "??????", "?qq??????", "?qq+?????"}:
             return f"{group_id}:{user_id}"
         return user_id
 
@@ -4320,7 +4322,7 @@ Out-Result $false 'target_qq_window_or_send_button_not_found' 'wait'
 
     def _parse_self_test_command(self, text: str) -> tuple[str, str] | None:
         text = self._normalize_control_text(text)
-        command = "新人欢迎测试"
+        command = "??????"
         if text == command:
             return "", ""
         if not text.startswith(command):
@@ -4429,39 +4431,39 @@ Out-Result $false 'target_qq_window_or_send_button_not_found' 'wait'
     def _is_image_reply_command_text(self, text: str) -> bool:
         command = self._string(text).split(maxsplit=1)[0]
         return command in {
-            "添加一图回复图片",
-            "设置一图回复图片",
-            "录入一图回复图片",
-            "添加两图回复图片",
-            "设置两图回复图片",
-            "录入两图回复图片",
-            "删除一图回复图片",
-            "移除一图回复图片",
-            "删除两图回复图片",
-            "移除两图回复图片",
+            "????????",
+            "????????",
+            "????????",
+            "????????",
+            "????????",
+            "????????",
+            "????????",
+            "????????",
+            "????????",
+            "????????",
         }
 
     def _normalize_control_text(self, text: str) -> str:
         text = self._string(text)
-        for prefix in ("/", "／", "#", "＃", "!", "！"):
+        for prefix in ("/", "?", "#", "?", "!", "?"):
             if text.startswith(prefix):
                 text = text[len(prefix) :].strip()
         return text
 
     def _start_words(self) -> set[str]:
-        return {"开始", "开始录制", "新人欢迎开始", "录制新人资料"}
+        return {"??", "????", "??????", "??????"}
 
     def _end_words(self) -> set[str]:
-        return {"结束", "保存", "结束录制", "新人欢迎结束"}
+        return {"??", "??", "????", "??????"}
 
     def _cancel_words(self) -> set[str]:
-        return {"取消", "取消录制", "取消添加", "新人欢迎取消"}
+        return {"??", "????", "????", "??????"}
 
     def _status_words(self) -> set[str]:
-        return {"状态", "录制状态", "新人欢迎状态"}
+        return {"??", "????", "??????"}
 
     def _clear_words(self) -> set[str]:
-        return {"清空", "清空资料", "新人欢迎清空"}
+        return {"??", "????", "??????"}
 
     def _guess_suffix(self, url: str) -> str:
         path = urllib.parse.urlparse(url).path
@@ -4513,7 +4515,7 @@ Out-Result $false 'target_qq_window_or_send_button_not_found' 'wait'
         if isinstance(value, bool):
             return value
         if isinstance(value, str):
-            return value.strip().lower() in {"1", "true", "yes", "on", "是", "开启"}
+            return value.strip().lower() in {"1", "true", "yes", "on", "?", "??"}
         return bool(value)
 
     def _get_float(self, key: str, default: float = 0.0) -> float:
@@ -4525,7 +4527,7 @@ Out-Result $false 'target_qq_window_or_send_button_not_found' 'wait'
         result: list[float] = []
         for value in values:
             if isinstance(value, str):
-                parts = [part.strip() for part in re.split(r"[\s,，]+", value) if part.strip()]
+                parts = [part.strip() for part in re.split(r"[\s,?]+", value) if part.strip()]
             else:
                 parts = [value]
             for part in parts:

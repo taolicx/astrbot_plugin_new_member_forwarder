@@ -9,7 +9,8 @@ param(
   [string]$TargetQQ = "",
   [string]$Message = "",
   [int]$WaitSeconds = 8,
-  [string]$OutDir = ""
+  [string]$OutDir = "",
+  [string]$TraceFile = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -17,16 +18,22 @@ if (-not $OutDir) {
   $OutDir = Join-Path $PSScriptRoot ("stable-" + (Get-Date -Format "yyyyMMdd-HHmmss"))
 }
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
+if (-not $TraceFile -and $env:NMF_TRACE_FILE) {
+  $TraceFile = $env:NMF_TRACE_FILE
+}
+
+function Write-TraceStage([string]$Stage) {
+  if (-not $TraceFile) { return }
+  try {
+    ((Get-Date).ToString("o") + " " + $Stage) | Add-Content -LiteralPath $TraceFile -Encoding UTF8
+  } catch {}
+}
+
+Write-TraceStage "startup"
 
 Add-Type -AssemblyName System.Drawing
 Add-Type -AssemblyName System.Windows.Forms
-try {
-  Add-Type -AssemblyName UIAutomationClient -ErrorAction Stop
-  Add-Type -AssemblyName UIAutomationTypes -ErrorAction Stop
-  $script:UiaAvailable = $true
-} catch {
-  $script:UiaAvailable = $false
-}
+$script:UiaAvailable = $false
 
 Add-Type -TypeDefinition @"
 using System;
@@ -437,7 +444,7 @@ function Wait-ForGroupPanel($Frame, [int]$Seconds) {
   $last = $null
   while ((Get-Date) -lt $deadline) {
     $last = Get-GroupPanelScore $Frame
-    if ($last.GroupPanelDetected) {
+    if ($last.GroupPanelDetected -or $TargetQQ) {
       return $last
     }
     Start-Sleep -Milliseconds 500
@@ -512,27 +519,38 @@ function Open-SearchResultProfile($MainFrame, [int]$BaseY) {
 $shots = New-Object System.Collections.ArrayList
 $steps = New-Object System.Collections.ArrayList
 
+Write-TraceStage "close-profile-popups"
 Close-ProfilePopups
+Write-TraceStage "get-main-window"
 $main = Get-MainQQWindow
+Write-TraceStage ("main-window=" + ($main | ConvertTo-Json -Compress))
+Write-TraceStage "focus-main-window"
 Focus-Maximized $main.Handle
+Write-TraceStage "press-escape"
 Press-Escape
 Press-Escape
 $main = Get-MainQQWindow
 [void]$shots.Add((Save-Shot $main "01-maximized-start.png"))
 [void]$steps.Add("maximized")
+Write-TraceStage "maximized"
 
 # Conversation rows are stable after the target group is pinned.
 $groupX = $main.Left + [int]([Math]::Min(360, [Math]::Max(220, $main.Width * 0.16)))
 $groupY = $main.Top + $GroupBaseY + (($GroupRow - 1) * 95)
+Write-TraceStage ("click-group x=" + $groupX + " y=" + $groupY)
 Click-At $groupX $groupY
 Start-Sleep -Milliseconds 900
 $main = Get-MainQQWindow
 [void]$shots.Add((Save-Shot $main "02-after-group-click.png"))
 if ($TargetQQ) {
+  Write-TraceStage "check-group-panel-target"
   $groupScore = Wait-ForGroupPanel $main $WaitSeconds
+  Write-TraceStage ("group-panel-score=" + ($groupScore | ConvertTo-Json -Compress))
   [void]$steps.Add("group-panel-ok")
 } else {
+  Write-TraceStage "check-group-panel-probe"
   $groupScore = Wait-ForGroupPanel $main $WaitSeconds
+  Write-TraceStage ("group-panel-score=" + ($groupScore | ConvertTo-Json -Compress))
   [void]$steps.Add("group-panel-ok")
   # Clear any text in the group editor before touching the visible member list.
   $editorX = $main.Left + [int]($main.Width * 0.40)
@@ -546,12 +564,16 @@ if ($TargetQQ) {
   $usedMemberSearch = $true
   $searchIconX = $main.Left + $main.Width - 31
   $searchIconY = $main.Top + 264
+  Write-TraceStage ("click-member-search x=" + $searchIconX + " y=" + $searchIconY)
   Click-At $searchIconX $searchIconY
   Start-Sleep -Milliseconds 500
+  Write-TraceStage "clear-member-search"
   Press-CtrlA-Backspace
+  Write-TraceStage "paste-target-qq"
   Paste-Text $TargetQQ
   Start-Sleep -Seconds 1
   [void]$shots.Add((Save-Shot $main "03-member-search-result.png"))
+  Write-TraceStage "open-search-result-profile"
   $profile = Open-SearchResultProfile $main $SearchResultBaseY
   if (-not $profile) {
     [void]$shots.Add((Save-Shot $main "03b-after-result-clicks.png"))
@@ -563,21 +585,26 @@ if ($TargetQQ) {
   $profile = Try-WaitForProfile $WaitSeconds
 }
 if (-not $profile) {
+  Write-TraceStage "wait-profile"
   $profile = Wait-ForProfile $WaitSeconds
 }
+Write-TraceStage ("profile-window=" + ($profile | ConvertTo-Json -Compress))
 $profileShot = Save-Shot $profile "04-profile-card.png"
 [void]$shots.Add($profileShot)
+Write-TraceStage "ocr-profile"
 $profileOcr = Assert-ProfileQQ $profileShot $TargetQQ
 [void]$steps.Add("profile-ok")
 
 $sendX = $profile.Left + [int]($profile.Width * 0.73)
 $sendY = $profile.Top + $profile.Height - 62
+Write-TraceStage ("click-send-button x=" + $sendX + " y=" + $sendY)
 Click-At $sendX $sendY
 Start-Sleep -Seconds 1
 $main = Get-MainQQWindow
 Focus-Maximized $main.Handle
 $main = Get-MainQQWindow
 [void]$shots.Add((Save-Shot $main "05-private-chat-before-send.png"))
+Write-TraceStage "assert-private-chat"
 $privateScore = Assert-PrivateChat $main
 [void]$steps.Add("private-chat-ok")
 
@@ -585,14 +612,18 @@ $sent = $false
 if ($Mode -eq "send") {
   $privateEditorX = $main.Left + [int]($main.Width * 0.40)
   $privateEditorY = $main.Top + $main.Height - 235
+  Write-TraceStage ("click-private-editor x=" + $privateEditorX + " y=" + $privateEditorY)
   Click-At $privateEditorX $privateEditorY
   Press-CtrlA-Backspace
+  Write-TraceStage "paste-warmup-message"
   Paste-Text $Message
+  Write-TraceStage "press-enter"
   Press-Enter
   Start-Sleep -Seconds 1
   $sent = $true
   [void]$shots.Add((Save-Shot $main "06-private-chat-after-send.png"))
   [void]$steps.Add("sent")
+  Write-TraceStage "sent"
 }
 
 $result = [ordered]@{
