@@ -30,7 +30,7 @@ class TempSessionNotReadyError(RuntimeError):
     PLUGIN_NAME,
     "Codex",
     "管理员私聊录制新人入群资料，新人进群时自动私聊转发文字、图片和聊天记录。",
-    "1.4.34",
+    "1.4.35",
 )
 class NewMemberForwarderPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig | None = None):
@@ -57,8 +57,18 @@ class NewMemberForwarderPlugin(Star):
         self.delivery_history_file = self.data_dir / "delivery_history.json"
         self.pending_file = self.data_dir / "pending_deliveries.json"
         self.warmup_source_file = self.data_dir / "warmup_source.json"
+        self.config_file = self._resolve_config_file()
+        self._config_file_cache: dict[str, Any] = {}
+        self._config_file_mtime: float | None = None
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.media_dir.mkdir(parents=True, exist_ok=True)
+        logger.info(
+            "new_member_forwarder: config file=%s human_warmup=%s stable_member_search=%s strict_original_forward_only=%s",
+            self.config_file,
+            self._get_bool("qq_human_group_warmup_enabled", False),
+            self._get_bool("qq_human_group_warmup_stable_member_search_enabled", True),
+            self._get_bool("strict_original_forward_only", True),
+        )
 
     @filter.platform_adapter_type(filter.PlatformAdapterType.AIOCQHTTP)
     @filter.event_message_type(filter.EventMessageType.PRIVATE_MESSAGE)
@@ -946,7 +956,7 @@ class NewMemberForwarderPlugin(Star):
             if kind in {"forward_id", "forward"} and not self._forward_item_has_reference(item):
                 raise RuntimeError("recorded forward item is old format and has no source_message_id; please re-record it")
 
-        if self._string(group_id):
+        if self._string(group_id) and not skip_warmup:
             await self._wait_private_context_ready(bot, group_id, user_id, self_id)
         desktop_warmup_sent = self._recent_desktop_warmup_sent(group_id, user_id)
         if not skip_warmup and self._should_send_warmup_message(items) and not desktop_warmup_sent:
@@ -1022,10 +1032,13 @@ class NewMemberForwarderPlugin(Star):
         return False
 
     def _forward_item_has_reference(self, item: dict[str, Any]) -> bool:
-        return bool(self._forward_item_source_message_id(item))
+        return bool(self._forward_item_source_message_id(item) or self._forward_item_forward_id(item))
 
     def _forward_item_source_message_id(self, item: dict[str, Any]) -> str:
         return self._string(item.get("source_message_id") or item.get("message_id"))
+
+    def _forward_item_forward_id(self, item: dict[str, Any]) -> str:
+        return self._string(item.get("forward_id") or item.get("id"))
 
     async def _send_recorded_forward(
         self,
@@ -1035,6 +1048,27 @@ class NewMemberForwarderPlugin(Star):
         self_id: str,
         group_id: str,
     ) -> None:
+        forward_id = self._forward_item_forward_id(item)
+        if forward_id and self._get_bool("forward_segment_send_enabled", True):
+            try:
+                await self._send_original_forward(bot, user_id, forward_id, self_id, group_id)
+                logger.info(
+                    "new_member_forwarder: sent recorded original forward segment to user %s in group %s.",
+                    user_id,
+                    self._string(group_id) or "-",
+                )
+                return
+            except Exception as exc:
+                logger.warning(
+                    "new_member_forwarder: recorded original forward segment failed id=%s user=%s group=%s: %s",
+                    forward_id,
+                    user_id,
+                    self._string(group_id) or "-",
+                    self._short_error(exc),
+                )
+                if self._get_bool("strict_original_forward_only", True):
+                    raise
+
         source_message_id = self._forward_item_source_message_id(item)
         if not source_message_id:
             raise RuntimeError("recorded forward item has no source_message_id; please re-record it")
@@ -1126,6 +1160,7 @@ class NewMemberForwarderPlugin(Star):
             "user_id": int(user_id),
             "message": [{"type": "forward", "data": {"id": forward_id}}],
         }
+        payload.update(self._routing_kwargs(self_id))
         group_id = self._string(group_id)
         await self._call_private_action(
             bot,
@@ -1176,6 +1211,7 @@ class NewMemberForwarderPlugin(Star):
         user_id = self._string(user_id)
         if not group_id.isdigit() or not user_id.isdigit():
             return True
+        human_enabled = self._get_bool("qq_human_group_warmup_enabled", False)
         member_info: Any = None
         try:
             member_info = await bot.call_action(
@@ -1192,11 +1228,22 @@ class NewMemberForwarderPlugin(Star):
                 group_id,
                 exc,
             )
-            return False
+            if not human_enabled:
+                return False
 
-        list_status = await self._check_group_member_list(bot, group_id, user_id, self_id)
-        if list_status is False:
-            return False
+        if not human_enabled:
+            list_status = await self._check_group_member_list(bot, group_id, user_id, self_id)
+            if list_status is False:
+                return False
+        else:
+            list_status = await self._check_group_member_list(bot, group_id, user_id, self_id)
+            if list_status is False:
+                logger.info(
+                    "new_member_forwarder: LLBot group member list does not contain user %s in group %s, "
+                    "but human QQ member-search warmup is enabled; continue with QQ desktop search.",
+                    user_id,
+                    group_id,
+                )
         member_name = self._member_display_name(member_info)
         group_name = await self._get_group_display_name(bot, group_id, self_id)
         human_sent = await self._send_qq_human_group_warmup_message(
@@ -1207,6 +1254,8 @@ class NewMemberForwarderPlugin(Star):
         )
         if human_sent:
             return True
+        if human_enabled and self._get_bool("qq_human_group_warmup_required", True):
+            return False
         llbot_activated = await self._activate_llbot_temp_context(bot, group_id, user_id)
         opened = await self._open_qq_profile_context(group_id, user_id)
         if llbot_activated or opened:
@@ -1290,7 +1339,11 @@ class NewMemberForwarderPlugin(Star):
         cooldown = max(0.0, self._get_float("qq_human_group_warmup_cooldown_seconds", 90.0))
         last_at = self._qq_human_group_warmup_last_at.get(key, 0.0)
         if not force and cooldown and now - last_at < cooldown:
-            return self._recent_desktop_warmup_sent(group_id, user_id)
+            if self._recent_desktop_warmup_sent(group_id, user_id):
+                return True
+            last_result = self._qq_human_group_warmup_results.get(key) or {}
+            if not (isinstance(last_result, dict) and last_result.get("ok") is False):
+                return False
         self._qq_human_group_warmup_last_at[key] = now
 
         timeout = max(8.0, self._get_float("qq_human_group_warmup_timeout_seconds", 45.0))
@@ -1462,6 +1515,696 @@ class NewMemberForwarderPlugin(Star):
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
 
+    def _verified_qq_human_stable_script_path(self) -> Path | None:
+        candidates = [
+            self.plugin_dir / "qq_human_send_stable.ps1",
+            Path("D:/")
+            / "\u521b\u5efa\u6587\u4ef6"
+            / "QQ\u7a97\u53e3\u81ea\u52a8\u5316\u6d4b\u8bd5"
+            / "qq_human_send_stable.ps1",
+        ]
+        for path in candidates:
+            try:
+                if path.exists() and path.is_file():
+                    return path
+            except Exception:
+                continue
+        return None
+
+    def _qq_human_debug_base(self) -> Path:
+        default = (
+            Path("D:/")
+            / "\u521b\u5efa\u6587\u4ef6"
+            / "QQ\u7a97\u53e3\u81ea\u52a8\u5316\u6d4b\u8bd5"
+        )
+        value = self._string(self._get("qq_human_group_warmup_debug_dir", str(default))).strip()
+        return Path(value) if value else default
+
+    def _json_from_powershell_stdout(self, stdout: str) -> dict[str, Any] | None:
+        text = (stdout or "").strip()
+        if not text:
+            return None
+        candidates = [text]
+        start = text.find("{")
+        end = text.rfind("}")
+        if start >= 0 and end > start:
+            candidates.append(text[start : end + 1])
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        if lines:
+            candidates.append(lines[-1])
+        for candidate in candidates:
+            try:
+                data = json.loads(candidate)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(data, dict):
+                return data
+        return None
+
+    def _run_verified_qq_human_stable_script(
+        self,
+        script_path: Path,
+        group_id: str,
+        user_id: str,
+        text: str,
+        timeout: float,
+    ) -> dict[str, Any]:
+        runtime_dir = self.data_dir / "runtime_scripts"
+        trace_path = runtime_dir / f"human_stable_warmup_{group_id}_{user_id}_{int(time.time() * 1000)}.trace.log"
+        out_dir = self._qq_human_debug_base() / f"plugin-{time.strftime('%Y%m%d-%H%M%S')}-{group_id}-{user_id}"
+        try:
+            runtime_dir.mkdir(parents=True, exist_ok=True)
+            out_dir.mkdir(parents=True, exist_ok=True)
+            trace_path.write_text(f"external_script={script_path}\n", encoding="utf-8")
+        except Exception:
+            pass
+
+        command = [
+            "powershell.exe",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-STA",
+            "-File",
+            str(script_path),
+            "-Mode",
+            "send",
+            "-GroupRow",
+            str(max(1, int(self._get_float("qq_human_group_warmup_group_row", 1)))),
+            "-GroupBaseY",
+            str(max(1, int(self._get_float("qq_human_group_warmup_group_base_y", 150)))),
+            "-SearchResultBaseY",
+            str(max(1, int(self._get_float("qq_human_group_warmup_search_result_base_y", 322)))),
+            "-TargetQQ",
+            user_id,
+            "-Message",
+            text,
+            "-WaitSeconds",
+            str(max(3, int(self._get_float("qq_human_group_warmup_wait_seconds", 20.0)))),
+            "-OutDir",
+            str(out_dir),
+        ]
+        try:
+            completed = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=timeout,
+            )
+        except subprocess.TimeoutExpired:
+            stage = self._read_runtime_trace_tail(trace_path) or "external_timeout"
+            return {
+                "ok": False,
+                "stage": stage,
+                "reason": f"powershell_timeout_after_{timeout:.1f}s",
+                "outDir": str(out_dir),
+                "script": str(script_path),
+            }
+
+        stdout = completed.stdout or ""
+        stderr = completed.stderr or ""
+        result_path = out_dir / "result.json"
+        data: dict[str, Any] | None = None
+        if result_path.exists():
+            try:
+                parsed = json.loads(result_path.read_text(encoding="utf-8-sig"))
+                if isinstance(parsed, dict):
+                    data = parsed
+            except Exception:
+                data = None
+        if data is None:
+            data = self._json_from_powershell_stdout(stdout)
+        if data is not None:
+            sent = bool(data.get("sent") or data.get("ok"))
+            return {
+                "ok": sent,
+                "stage": "sent" if sent else self._string(data.get("stage") or data.get("mode") or "not_sent"),
+                "reason": "sent" if sent else self._short_error(RuntimeError(stderr or stdout or "not sent"), 300),
+                "outDir": self._string(data.get("outDir")) or str(out_dir),
+                "script": str(script_path),
+                "steps": data.get("steps"),
+                "shots": data.get("shots"),
+                "profileOcr": data.get("profileOcr"),
+                "returncode": completed.returncode,
+            }
+
+        return {
+            "ok": False,
+            "stage": "powershell",
+            "reason": self._short_error(
+                RuntimeError(stderr or stdout or f"powershell exited with {completed.returncode}"),
+                300,
+            ),
+            "outDir": str(out_dir),
+            "script": str(script_path),
+            "returncode": completed.returncode,
+        }
+
+    def _run_qq_human_group_warmup_stable_script(
+        self,
+        group_id: str,
+        user_id: str,
+        target_name: str,
+        group_name: str,
+        text: str,
+        timeout: float,
+    ) -> dict[str, Any]:
+        verified_script = self._verified_qq_human_stable_script_path()
+        if verified_script is not None:
+            return self._run_verified_qq_human_stable_script(verified_script, group_id, user_id, text, timeout)
+
+        script = r"""
+$ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName System.Drawing
+Add-Type -AssemblyName System.Windows.Forms
+
+Add-Type -TypeDefinition @"
+using System;
+using System.Text;
+using System.Runtime.InteropServices;
+public class NmfStableHuman {
+  public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+  [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
+  [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
+  [DllImport("user32.dll")] public static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
+  [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern bool ShowWindowAsync(IntPtr hWnd, int nCmdShow);
+  [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
+  [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr hWnd, uint Msg, UIntPtr wParam, UIntPtr lParam);
+  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+  [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetWindowText(IntPtr hWnd, StringBuilder text, int count);
+  [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetClassName(IntPtr hWnd, StringBuilder text, int count);
+  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
+  [DllImport("dwmapi.dll")] public static extern int DwmGetWindowAttribute(IntPtr hwnd, int attr, out RECT pvAttribute, int cbAttribute);
+  [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hWnd, out RECT rect);
+  [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
+  [DllImport("user32.dll")] public static extern void mouse_event(uint flags, uint dx, uint dy, uint data, UIntPtr extra);
+  [DllImport("user32.dll")] public static extern void keybd_event(byte vk, byte scan, uint flags, UIntPtr extra);
+}
+"@
+
+[NmfStableHuman]::SetProcessDPIAware() | Out-Null
+
+$script:Stage = 'startup'
+$script:Shots = New-Object System.Collections.ArrayList
+$script:ProfileTitle = -join ([char[]](0x8d44, 0x6599, 0x5361))
+$TargetQQ = ($env:NMF_TARGET_USER_ID + '').Trim()
+$MessageText = $env:NMF_WARMUP_TEXT
+$OutDir = $env:NMF_OUT_DIR
+if (-not $OutDir) {
+  $OutDir = Join-Path $env:TEMP ('nmf-human-' + (Get-Date -Format 'yyyyMMdd-HHmmss'))
+}
+New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
+
+function Set-Stage([string]$stage) {
+  $script:Stage = $stage
+  try {
+    if ($env:NMF_TRACE_FILE) {
+      Add-Content -LiteralPath $env:NMF_TRACE_FILE -Value $stage -Encoding UTF8
+    }
+  } catch {}
+}
+
+function Out-Result([bool]$ok, [string]$reason, [string]$stage, $extra) {
+  $result = [ordered]@{
+    ok = $ok
+    reason = $reason
+    stage = $stage
+    outDir = $OutDir
+    shots = @($script:Shots)
+  }
+  if ($extra -ne $null) {
+    foreach ($key in $extra.Keys) {
+      $result[$key] = $extra[$key]
+    }
+  }
+  $result | ConvertTo-Json -Depth 8 -Compress
+}
+
+function Get-IntEnv([string]$name, [int]$defaultValue) {
+  try {
+    $value = [int]([Environment]::GetEnvironmentVariable($name))
+    if ($value -gt 0) { return $value }
+  } catch {}
+  return $defaultValue
+}
+
+function Get-FloatEnv([string]$name, [double]$defaultValue) {
+  try {
+    $value = [double]([Environment]::GetEnvironmentVariable($name))
+    if ($value -gt 0) { return $value }
+  } catch {}
+  return $defaultValue
+}
+
+function Get-Text([IntPtr]$Hwnd) {
+  $sb = New-Object System.Text.StringBuilder 512
+  [NmfStableHuman]::GetWindowText($Hwnd, $sb, $sb.Capacity) | Out-Null
+  $sb.ToString()
+}
+
+function Get-Class([IntPtr]$Hwnd) {
+  $sb = New-Object System.Text.StringBuilder 256
+  [NmfStableHuman]::GetClassName($Hwnd, $sb, $sb.Capacity) | Out-Null
+  $sb.ToString()
+}
+
+function Get-Frame([IntPtr]$Hwnd) {
+  $r = New-Object NmfStableHuman+RECT
+  $hr = [NmfStableHuman]::DwmGetWindowAttribute($Hwnd, 9, [ref]$r, [Runtime.InteropServices.Marshal]::SizeOf([type][NmfStableHuman+RECT]))
+  if ($hr -ne 0 -or $r.Right -le $r.Left -or $r.Bottom -le $r.Top) {
+    [NmfStableHuman]::GetWindowRect($Hwnd, [ref]$r) | Out-Null
+  }
+  [pscustomobject]@{
+    Left = [int]$r.Left
+    Top = [int]$r.Top
+    Right = [int]$r.Right
+    Bottom = [int]$r.Bottom
+    Width = [int]($r.Right - $r.Left)
+    Height = [int]($r.Bottom - $r.Top)
+  }
+}
+
+function Find-QQWindows {
+  $qqPids = @(Get-Process QQ -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Id)
+  $rows = New-Object System.Collections.ArrayList
+  $cb = [NmfStableHuman+EnumWindowsProc]{
+    param([IntPtr]$hWnd, [IntPtr]$lParam)
+    $procId = [uint32]0
+    [NmfStableHuman]::GetWindowThreadProcessId($hWnd, [ref]$procId) | Out-Null
+    if ($qqPids -contains [int]$procId) {
+      $frame = Get-Frame $hWnd
+      $className = Get-Class $hWnd
+      $title = Get-Text $hWnd
+      if ($className -eq 'Chrome_WidgetWin_1' -and $frame.Width -gt 20 -and $frame.Height -gt 20) {
+        [void]$rows.Add([pscustomobject]@{
+          Handle = $hWnd
+          HandleValue = $hWnd.ToInt64()
+          Title = $title
+          Class = $className
+          Visible = [NmfStableHuman]::IsWindowVisible($hWnd)
+          Left = $frame.Left
+          Top = $frame.Top
+          Width = $frame.Width
+          Height = $frame.Height
+          Area = $frame.Width * $frame.Height
+        })
+      }
+    }
+    return $true
+  }
+  [NmfStableHuman]::EnumWindows($cb, [IntPtr]::Zero) | Out-Null
+  @($rows | Sort-Object Area -Descending)
+}
+
+function Get-MainQQWindow {
+  $windows = Find-QQWindows
+  $main = $windows | Where-Object { $_.Title -eq 'QQ' -and $_.Width -ge 800 -and $_.Height -ge 600 } | Select-Object -First 1
+  if (-not $main) {
+    $main = $windows | Where-Object { $_.Width -ge 800 -and $_.Height -ge 600 } | Select-Object -First 1
+  }
+  if (-not $main) {
+    throw 'main QQ window not found'
+  }
+  $main
+}
+
+function Focus-Maximized([IntPtr]$Hwnd) {
+  [NmfStableHuman]::ShowWindowAsync($Hwnd, 3) | Out-Null
+  Start-Sleep -Milliseconds 350
+  [NmfStableHuman]::SetWindowPos($Hwnd, [IntPtr](-1), 0, 0, 0, 0, 0x0001 -bor 0x0002 -bor 0x0040) | Out-Null
+  Start-Sleep -Milliseconds 80
+  [NmfStableHuman]::SetWindowPos($Hwnd, [IntPtr](-2), 0, 0, 0, 0, 0x0001 -bor 0x0002 -bor 0x0040) | Out-Null
+  [NmfStableHuman]::BringWindowToTop($Hwnd) | Out-Null
+  [NmfStableHuman]::SetForegroundWindow($Hwnd) | Out-Null
+  Start-Sleep -Milliseconds 450
+}
+
+function Click-At([int]$X, [int]$Y) {
+  [NmfStableHuman]::SetCursorPos($X, $Y) | Out-Null
+  Start-Sleep -Milliseconds 100
+  [NmfStableHuman]::mouse_event(2, 0, 0, 0, [UIntPtr]::Zero)
+  Start-Sleep -Milliseconds 70
+  [NmfStableHuman]::mouse_event(4, 0, 0, 0, [UIntPtr]::Zero)
+  Start-Sleep -Milliseconds 350
+}
+
+function DoubleClick-At([int]$X, [int]$Y) {
+  [NmfStableHuman]::SetCursorPos($X, $Y) | Out-Null
+  Start-Sleep -Milliseconds 100
+  for ($i = 0; $i -lt 2; $i++) {
+    [NmfStableHuman]::mouse_event(2, 0, 0, 0, [UIntPtr]::Zero)
+    Start-Sleep -Milliseconds 45
+    [NmfStableHuman]::mouse_event(4, 0, 0, 0, [UIntPtr]::Zero)
+    Start-Sleep -Milliseconds 90
+  }
+  Start-Sleep -Milliseconds 500
+}
+
+function Press-Key([byte]$vk) {
+  [NmfStableHuman]::keybd_event($vk, 0, 0, [UIntPtr]::Zero)
+  Start-Sleep -Milliseconds 55
+  [NmfStableHuman]::keybd_event($vk, 0, 2, [UIntPtr]::Zero)
+  Start-Sleep -Milliseconds 160
+}
+
+function Press-CtrlA-Backspace {
+  [NmfStableHuman]::keybd_event(0x11, 0, 0, [UIntPtr]::Zero)
+  [NmfStableHuman]::keybd_event(0x41, 0, 0, [UIntPtr]::Zero)
+  [NmfStableHuman]::keybd_event(0x41, 0, 2, [UIntPtr]::Zero)
+  [NmfStableHuman]::keybd_event(0x11, 0, 2, [UIntPtr]::Zero)
+  Start-Sleep -Milliseconds 80
+  Press-Key 0x08
+}
+
+function Paste-Text([string]$Text) {
+  [System.Windows.Forms.Clipboard]::SetText($Text)
+  Start-Sleep -Milliseconds 120
+  [NmfStableHuman]::keybd_event(0x11, 0, 0, [UIntPtr]::Zero)
+  [NmfStableHuman]::keybd_event(0x56, 0, 0, [UIntPtr]::Zero)
+  [NmfStableHuman]::keybd_event(0x56, 0, 2, [UIntPtr]::Zero)
+  [NmfStableHuman]::keybd_event(0x11, 0, 2, [UIntPtr]::Zero)
+  Start-Sleep -Milliseconds 300
+}
+
+function Save-Shot($Frame, [string]$Name) {
+  $path = Join-Path $OutDir $Name
+  $bmp = New-Object System.Drawing.Bitmap $Frame.Width, $Frame.Height
+  $g = [System.Drawing.Graphics]::FromImage($bmp)
+  $g.CopyFromScreen($Frame.Left, $Frame.Top, 0, 0, [System.Drawing.Size]::new($Frame.Width, $Frame.Height))
+  $bmp.Save($path, [System.Drawing.Imaging.ImageFormat]::Png)
+  $g.Dispose()
+  $bmp.Dispose()
+  [void]$script:Shots.Add($path)
+  $path
+}
+
+function Get-GroupPanelScore($Frame) {
+  $lineHeight = [Math]::Min(520, [Math]::Max(160, $Frame.Height - 250))
+  $x = $Frame.Left + $Frame.Width - 275
+  $y = $Frame.Top + 135
+  $bmp = New-Object System.Drawing.Bitmap 1, $lineHeight
+  $g = [System.Drawing.Graphics]::FromImage($bmp)
+  $g.CopyFromScreen($x, $y, 0, 0, [System.Drawing.Size]::new(1, $lineHeight))
+  $g.Dispose()
+  $score = 0
+  for ($i = 0; $i -lt $lineHeight; $i++) {
+    $c = $bmp.GetPixel(0, $i)
+    $b = ($c.R + $c.G + $c.B) / 3.0
+    if ($b -ge 42 -and $b -le 70) { $score += 1 }
+  }
+  $bmp.Dispose()
+  [pscustomobject]@{ Score = $score; Height = $lineHeight; Ratio = $score / [double]$lineHeight }
+}
+
+function Wait-ForGroupPanel($Frame, [int]$Seconds) {
+  $deadline = (Get-Date).AddSeconds($Seconds)
+  $last = $null
+  while ((Get-Date) -lt $deadline) {
+    $last = Get-GroupPanelScore $Frame
+    if ($last.Ratio -gt 0.55) { return $last }
+    Start-Sleep -Milliseconds 500
+  }
+  throw ('group member panel was not detected; score=' + ($last | ConvertTo-Json -Compress))
+}
+
+function Assert-PrivateChat($Frame) {
+  $score = Get-GroupPanelScore $Frame
+  if ($score.Ratio -gt 0.12) {
+    throw ('private chat guard refused to send; group panel still visible; score=' + ($score | ConvertTo-Json -Compress))
+  }
+  $score
+}
+
+function Close-ProfilePopups {
+  foreach ($popup in @(Find-QQWindows | Where-Object { $_.Title -eq $script:ProfileTitle })) {
+    [NmfStableHuman]::PostMessage($popup.Handle, 0x0010, [UIntPtr]::Zero, [UIntPtr]::Zero) | Out-Null
+  }
+  Start-Sleep -Milliseconds 400
+}
+
+function Wait-ForProfile([int]$Seconds) {
+  $deadline = (Get-Date).AddSeconds($Seconds)
+  while ((Get-Date) -lt $deadline) {
+    $profile = Find-QQWindows | Where-Object {
+      $_.Title -eq $script:ProfileTitle -and $_.Visible -and $_.Left -ge 0 -and $_.Top -ge 0 -and $_.Width -gt 300 -and $_.Height -gt 300
+    } | Select-Object -First 1
+    if ($profile) { return $profile }
+    Start-Sleep -Milliseconds 500
+  }
+  throw 'profile card was not detected'
+}
+
+function Try-WaitForProfile([int]$Seconds) {
+  try { return Wait-ForProfile $Seconds } catch { return $null }
+}
+
+function Open-SearchResultProfile($MainFrame, [int]$BaseY) {
+  $rowY = $MainFrame.Top + $BaseY
+  $avatarX = $MainFrame.Left + $MainFrame.Width - 240
+  $nameX = $MainFrame.Left + $MainFrame.Width - 185
+  Click-At $avatarX $rowY
+  $profile = Try-WaitForProfile 2
+  if ($profile) { return $profile }
+  Click-At $nameX $rowY
+  $profile = Try-WaitForProfile 2
+  if ($profile) { return $profile }
+  DoubleClick-At $avatarX $rowY
+  $profile = Try-WaitForProfile 2
+  if ($profile) { return $profile }
+  DoubleClick-At $nameX $rowY
+  $profile = Try-WaitForProfile 2
+  if ($profile) { return $profile }
+  return $null
+}
+
+function Read-ImageText([string]$Path) {
+  Add-Type -AssemblyName System.Runtime.WindowsRuntime
+  $null = [Windows.Storage.StorageFile, Windows.Storage, ContentType=WindowsRuntime]
+  $null = [Windows.Storage.FileAccessMode, Windows.Storage, ContentType=WindowsRuntime]
+  $null = [Windows.Storage.Streams.IRandomAccessStream, Windows.Storage.Streams, ContentType=WindowsRuntime]
+  $null = [Windows.Graphics.Imaging.BitmapDecoder, Windows.Graphics.Imaging, ContentType=WindowsRuntime]
+  $null = [Windows.Graphics.Imaging.SoftwareBitmap, Windows.Graphics.Imaging, ContentType=WindowsRuntime]
+  $null = [Windows.Media.Ocr.OcrEngine, Windows.Foundation, ContentType=WindowsRuntime]
+  $null = [Windows.Media.Ocr.OcrResult, Windows.Foundation, ContentType=WindowsRuntime]
+
+  function Await-WinRtOperation($Operation, [type]$ResultType) {
+    $method = [System.WindowsRuntimeSystemExtensions].GetMethods() | Where-Object {
+      $_.Name -eq 'AsTask' -and
+      $_.IsGenericMethod -and
+      $_.GetParameters().Count -eq 1 -and
+      $_.GetGenericArguments().Count -eq 1 -and
+      $_.ToString().StartsWith('System.Threading.Tasks.Task`1')
+    } | Select-Object -First 1
+    $generic = $method.MakeGenericMethod($ResultType)
+    $task = $generic.Invoke($null, @($Operation))
+    $task.GetAwaiter().GetResult()
+  }
+
+  $file = Await-WinRtOperation ([Windows.Storage.StorageFile]::GetFileFromPathAsync($Path)) ([Windows.Storage.StorageFile])
+  $stream = Await-WinRtOperation ($file.OpenAsync([Windows.Storage.FileAccessMode]::Read)) ([Windows.Storage.Streams.IRandomAccessStream])
+  $decoder = Await-WinRtOperation ([Windows.Graphics.Imaging.BitmapDecoder]::CreateAsync($stream)) ([Windows.Graphics.Imaging.BitmapDecoder])
+  $bitmap = Await-WinRtOperation ($decoder.GetSoftwareBitmapAsync()) ([Windows.Graphics.Imaging.SoftwareBitmap])
+  $engine = [Windows.Media.Ocr.OcrEngine]::TryCreateFromUserProfileLanguages()
+  if (-not $engine) { throw 'Windows OCR engine is not available' }
+  $result = Await-WinRtOperation ($engine.RecognizeAsync($bitmap)) ([Windows.Media.Ocr.OcrResult])
+  $result.Text
+}
+
+function Normalize-OcrToken([string]$token) {
+  $normalized = ($token + '').ToUpperInvariant()
+  $normalized = $normalized.Replace('O', '0').Replace('Q', '0')
+  $normalized = $normalized.Replace('I', '1').Replace('L', '1')
+  $normalized = $normalized.Replace('S', '5')
+  $normalized = $normalized.Replace('B', '8')
+  $normalized = $normalized.Replace('Z', '2')
+  return $normalized
+}
+
+function Assert-ProfileQQ([string]$ShotPath, [string]$ExpectedQQ) {
+  $ocrText = Read-ImageText $ShotPath
+  $digits = ($ocrText -replace '[^0-9]', ' ')
+  $parts = @($digits -split '\s+' | Where-Object { $_ })
+  $tokens = @($ocrText -split '[^0-9A-Za-z]+' | Where-Object { $_ })
+  $normalizedTokens = @()
+  foreach ($token in $tokens) {
+    $normalized = Normalize-OcrToken $token
+    if ($normalized -match '^[0-9]+$') { $normalizedTokens += $normalized }
+  }
+  if (($parts -notcontains $ExpectedQQ) -and ($normalizedTokens -notcontains $ExpectedQQ)) {
+    throw ('profile QQ mismatch; expected=' + $ExpectedQQ + '; ocr=' + $ocrText)
+  }
+  $ocrText
+}
+
+try {
+  if (-not $TargetQQ -or $TargetQQ -notmatch '^[0-9]+$') {
+    throw 'target QQ is empty or invalid'
+  }
+  if (-not $MessageText) {
+    throw 'warmup message is empty'
+  }
+
+  $groupRow = Get-IntEnv 'NMF_GROUP_ROW' 1
+  $groupBaseY = Get-IntEnv 'NMF_GROUP_BASE_Y' 150
+  $searchResultBaseY = Get-IntEnv 'NMF_SEARCH_RESULT_BASE_Y' 322
+  $waitSeconds = [int](Get-FloatEnv 'NMF_WAIT_SECONDS' 20.0)
+
+  Set-Stage 'close_profile_popups'
+  Close-ProfilePopups
+  Set-Stage 'focus_main'
+  $main = Get-MainQQWindow
+  Focus-Maximized $main.Handle
+  Press-Key 0x1B
+  Press-Key 0x1B
+  $main = Get-MainQQWindow
+  Save-Shot $main '01-maximized-start.png' | Out-Null
+
+  Set-Stage 'click_pinned_group'
+  $groupX = $main.Left + [int]([Math]::Min(360, [Math]::Max(220, $main.Width * 0.16)))
+  $groupY = $main.Top + $groupBaseY + (($groupRow - 1) * 95)
+  Click-At $groupX $groupY
+  Start-Sleep -Milliseconds 900
+  $main = Get-MainQQWindow
+  Save-Shot $main '02-after-group-click.png' | Out-Null
+
+  Set-Stage 'wait_group_panel'
+  $groupScore = Wait-ForGroupPanel $main $waitSeconds
+
+  Set-Stage 'member_search'
+  $searchIconX = $main.Left + $main.Width - 31
+  $searchIconY = $main.Top + 264
+  Click-At $searchIconX $searchIconY
+  Start-Sleep -Milliseconds 500
+  Press-CtrlA-Backspace
+  Paste-Text $TargetQQ
+  Start-Sleep -Seconds 1
+  Save-Shot $main '03-member-search-result.png' | Out-Null
+
+  Set-Stage 'open_profile'
+  $profile = Open-SearchResultProfile $main $searchResultBaseY
+  if (-not $profile) {
+    Save-Shot $main '03b-after-result-clicks.png' | Out-Null
+    $profile = Wait-ForProfile $waitSeconds
+  }
+  $profileShot = Save-Shot $profile '04-profile-card.png'
+
+  Set-Stage 'ocr_profile'
+  $profileOcr = Assert-ProfileQQ $profileShot $TargetQQ
+
+  Set-Stage 'open_private_chat'
+  $sendX = $profile.Left + [int]($profile.Width * 0.73)
+  $sendY = $profile.Top + $profile.Height - 62
+  Click-At $sendX $sendY
+  Start-Sleep -Seconds 1
+  $main = Get-MainQQWindow
+  Focus-Maximized $main.Handle
+  $main = Get-MainQQWindow
+  Save-Shot $main '05-private-chat-before-send.png' | Out-Null
+
+  Set-Stage 'private_guard'
+  $privateScore = Assert-PrivateChat $main
+
+  Set-Stage 'send_message'
+  $privateEditorX = $main.Left + [int]($main.Width * 0.40)
+  $privateEditorY = $main.Top + $main.Height - 235
+  Click-At $privateEditorX $privateEditorY
+  Press-CtrlA-Backspace
+  Paste-Text $MessageText
+  Press-Key 0x0D
+  Start-Sleep -Seconds 1
+  Save-Shot $main '06-private-chat-after-send.png' | Out-Null
+
+  Out-Result $true 'sent' 'sent' @{
+    targetQQ = $TargetQQ
+    profileOcr = $profileOcr
+    groupPanelRatio = $groupScore.Ratio
+    privateGuardRatio = $privateScore.Ratio
+    foreground = [NmfStableHuman]::GetForegroundWindow().ToInt64()
+  }
+} catch {
+  Out-Result $false ($_.Exception.Message) $script:Stage @{
+    targetQQ = $TargetQQ
+  }
+}
+"""
+        runtime_dir = self.data_dir / "runtime_scripts"
+        trace_path = runtime_dir / f"human_stable_warmup_{group_id}_{user_id}_{int(time.time() * 1000)}.trace.log"
+        debug_base = Path(
+            self._string(
+                self._get(
+                    "qq_human_group_warmup_debug_dir",
+                    r"D:\创建文件\QQ窗口自动化测试",
+                )
+            )
+            or r"D:\创建文件\QQ窗口自动化测试"
+        )
+        out_dir = debug_base / f"plugin-{time.strftime('%Y%m%d-%H%M%S')}-{group_id}-{user_id}"
+        try:
+            runtime_dir.mkdir(parents=True, exist_ok=True)
+            trace_path.write_text("", encoding="utf-8")
+            out_dir.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+        env = os.environ.copy()
+        env.update(
+            {
+                "NMF_GROUP_ID": group_id,
+                "NMF_GROUP_NAME": group_name or "",
+                "NMF_TARGET_USER_ID": user_id,
+                "NMF_TARGET_NAME": target_name or "",
+                "NMF_WARMUP_TEXT": text,
+                "NMF_WAIT_SECONDS": str(max(3.0, self._get_float("qq_human_group_warmup_wait_seconds", 20.0))),
+                "NMF_GROUP_ROW": str(max(1, int(self._get_float("qq_human_group_warmup_group_row", 1)))),
+                "NMF_GROUP_BASE_Y": str(max(1, int(self._get_float("qq_human_group_warmup_group_base_y", 150)))),
+                "NMF_SEARCH_RESULT_BASE_Y": str(
+                    max(1, int(self._get_float("qq_human_group_warmup_search_result_base_y", 322)))
+                ),
+                "NMF_TRACE_FILE": str(trace_path),
+                "NMF_OUT_DIR": str(out_dir),
+            }
+        )
+        try:
+            completed = self._run_powershell_sta_script_file(
+                script,
+                env,
+                timeout,
+                "human_stable_warmup.ps1",
+            )
+        except subprocess.TimeoutExpired:
+            stage = self._read_runtime_trace_tail(trace_path) or "timeout"
+            return {
+                "ok": False,
+                "stage": stage,
+                "reason": f"powershell_timeout_after_{timeout:.1f}s",
+                "outDir": str(out_dir),
+            }
+        stdout = (completed.stdout or "").strip()
+        stderr = (completed.stderr or "").strip()
+        last_line = stdout.splitlines()[-1].strip() if stdout else ""
+        if last_line:
+            try:
+                result = json.loads(last_line)
+                if isinstance(result, dict):
+                    if completed.returncode and not result.get("ok"):
+                        result["returncode"] = completed.returncode
+                    return result
+            except json.JSONDecodeError:
+                pass
+        return {
+            "ok": False,
+            "reason": self._short_error(
+                RuntimeError(stderr or stdout or f"powershell exited with {completed.returncode}"),
+                300,
+            ),
+            "returncode": completed.returncode,
+            "outDir": str(out_dir),
+        }
+
     def _run_qq_human_group_warmup_script(
         self,
         group_id: str,
@@ -1471,6 +2214,15 @@ class NewMemberForwarderPlugin(Star):
         text: str,
         timeout: float,
     ) -> dict[str, Any]:
+        if self._get_bool("qq_human_group_warmup_stable_member_search_enabled", True):
+            return self._run_qq_human_group_warmup_stable_script(
+                group_id,
+                user_id,
+                target_name,
+                group_name,
+                text,
+                timeout,
+            )
         script = r"""
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName UIAutomationClient
@@ -3304,6 +4056,20 @@ Out-Result $false 'target_qq_window_or_send_button_not_found' 'wait'
                 pass
         return Path.cwd() / "data" / "plugin_data" / PLUGIN_NAME
 
+    def _resolve_config_file(self) -> Path:
+        data_path: Path | None = None
+        if get_astrbot_data_path:
+            try:
+                data_path = Path(get_astrbot_data_path())
+            except Exception:
+                data_path = None
+        if data_path is None:
+            try:
+                data_path = self.data_dir.parent.parent
+            except Exception:
+                data_path = Path.cwd() / "data"
+        return data_path / "config" / f"{PLUGIN_NAME}_config.json"
+
     def _routing_kwargs(self, self_id: str) -> dict[str, Any]:
         if self_id and self_id.isdigit():
             return {"self_id": int(self_id)}
@@ -3866,7 +4632,34 @@ Out-Result $false 'target_qq_window_or_send_button_not_found' 'wait'
             return suffix
         return ".jpg"
 
+    def _load_file_config(self) -> dict[str, Any]:
+        try:
+            stat = self.config_file.stat()
+        except FileNotFoundError:
+            self._config_file_cache = {}
+            self._config_file_mtime = None
+            return {}
+        except Exception:
+            return self._config_file_cache
+
+        mtime = stat.st_mtime
+        if self._config_file_mtime == mtime:
+            return self._config_file_cache
+        try:
+            data = json.loads(self.config_file.read_text(encoding="utf-8-sig"))
+        except Exception as exc:
+            logger.warning("new_member_forwarder: failed to read config file %s: %s", self.config_file, exc)
+            return self._config_file_cache
+        if not isinstance(data, dict):
+            data = {}
+        self._config_file_cache = data
+        self._config_file_mtime = mtime
+        return data
+
     def _get(self, key: str, default: Any = None) -> Any:
+        file_config = self._load_file_config()
+        if key in file_config:
+            return file_config.get(key, default)
         if hasattr(self.config, "get"):
             try:
                 return self.config.get(key, default)

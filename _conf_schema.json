@@ -67,7 +67,37 @@
   "qq_human_group_warmup_enabled": {
     "type": "bool",
     "description": "启用真人式 QQ 桌面开路：打开来源群，找到新人，点击发消息，再发送开路文字。",
-    "default": false
+    "default": true
+  },
+  "qq_human_group_warmup_stable_member_search_enabled": {
+    "type": "bool",
+    "description": "使用固定 QQ 最大化流程：点击置顶群、右侧成员栏搜索 QQ、OCR 校验资料卡 QQ 后发送开路文字。",
+    "default": true
+  },
+  "qq_human_group_warmup_required": {
+    "type": "bool",
+    "description": "真人开路失败时是否阻止继续发送后续录制资料；建议开启，避免退回 API 后看似发送但新人收不到。",
+    "default": true
+  },
+  "qq_human_group_warmup_group_row": {
+    "type": "float",
+    "description": "目标群在 QQ 左侧会话列表中的置顶行号；第一行填 1。",
+    "default": 1
+  },
+  "qq_human_group_warmup_group_base_y": {
+    "type": "float",
+    "description": "QQ 最大化后左侧第一行群会话点击基准 Y 坐标；当前测试值 150。",
+    "default": 150
+  },
+  "qq_human_group_warmup_search_result_base_y": {
+    "type": "float",
+    "description": "QQ 最大化后右侧成员搜索结果第一行点击基准 Y 坐标；当前测试值 322。",
+    "default": 322
+  },
+  "qq_human_group_warmup_debug_dir": {
+    "type": "string",
+    "description": "真人开路截图和调试结果保存目录。",
+    "default": "D:\\创建文件\\QQ窗口自动化测试"
   },
   "qq_human_group_warmup_wait_seconds": {
     "type": "float",
@@ -223,6 +253,16 @@
     "type": "float",
     "description": "开路消息发送成功后，等待多少秒再发送录制资料。",
     "default": 1.0
+  },
+  "forward_segment_send_enabled": {
+    "type": "bool",
+    "description": "聊天记录优先用原始 forward 段发送，效果更接近手动转发的原始聊天记录卡。",
+    "default": true
+  },
+  "strict_original_forward_only": {
+    "type": "bool",
+    "description": "原始 forward 段发送失败时是否阻止改用 source node 外层转发；开启后可避免聊天记录多套一层。",
+    "default": true
   },
   "temp_session_retry_delays_seconds": {
     "type": "list",
