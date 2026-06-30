@@ -28,7 +28,7 @@ WARMUP_IMAGE_ASSET_KEY = "warmup"
     PLUGIN_NAME,
     "Codex",
     "管理员私聊录制新人入群资料，新人进群时自动私聊转发文字、图片和聊天记录。",
-    "1.4.64",
+    "1.4.65",
 )
 class NewMemberForwarderPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig | None = None):
@@ -42,6 +42,15 @@ class NewMemberForwarderPlugin(Star):
         self._image_buckets: dict[str, dict[str, Any]] = {}
         self._image_tasks: dict[str, asyncio.Task] = {}
         self._delivery_inflight: dict[str, int] = {}
+        self._delivery_queue: asyncio.Queue[dict[str, Any]] | None = None
+        self._delivery_worker_task: asyncio.Task | None = None
+        self._delivery_job_seq = 0
+        self._delivery_queue_stats = {
+            "enqueued": 0,
+            "completed": 0,
+            "failed": 0,
+            "dropped": 0,
+        }
         self._delivery_queue_lock = asyncio.Lock()
         self._last_delivery_finished_at = 0.0
         self._qq_human_group_warmup_sent_at: dict[str, float] = {}
@@ -123,10 +132,12 @@ class NewMemberForwarderPlugin(Star):
             saved_count = len(self._load_recorded_payload().get("items") or [])
             current_count = len((self._recording_sessions.get(sender_id) or {}).get("items") or [])
             recording = "是" if sender_id in self._recording_sessions else "否"
+            queue_size = self._delivery_queue.qsize() if self._delivery_queue is not None else 0
             yield event.plain_result(
                 f"正在录制：{recording}\n"
                 f"本次已录：{current_count} 条\n"
                 f"已保存资料：{saved_count} 条\n"
+                f"新人发送队列：{queue_size} 个等待中\n"
                 f"正在添加真人开路图片：{'是' if sender_id in self._warmup_image_recording_sessions else '否'}\n"
                 f"正在添加图片回复：{'是' if sender_id in self._image_reply_recording_sessions else '否'}\n"
                 f"存储位置：{self.record_file}"
@@ -200,26 +211,26 @@ class NewMemberForwarderPlugin(Star):
                 return
 
             delay = max(0.0, self._get_float("send_delay_seconds", 1.5))
-            if delay:
-                await asyncio.sleep(delay)
 
             bot = getattr(event, "bot", None)
             if not bot:
                 logger.warning("new_member_forwarder: current event has no aiocqhttp bot instance.")
                 return
 
-            try:
-                await self._deliver_private_with_retries(bot, user_id, items, self_id, group_id)
-                if delivery_slot_key:
-                    self._mark_delivery_success(group_id, user_id)
-            except Exception as exc:
-                logger.exception(
-                    "new_member_forwarder: human warmup or recorded material delivery failed for user %s in group %s; "
-                    "delivery was not counted: %s",
-                    user_id,
-                    group_id,
-                    self._short_error(exc),
-                )
+            if self._enqueue_delivery_job(
+                {
+                    "seq": self._next_delivery_job_seq(),
+                    "created_at": time.time(),
+                    "not_before": time.time() + delay,
+                    "bot": bot,
+                    "user_id": user_id,
+                    "group_id": group_id,
+                    "self_id": self_id,
+                    "items": items,
+                    "delivery_slot_key": delivery_slot_key,
+                }
+            ):
+                delivery_slot_key = ""
         finally:
             if delivery_slot_key:
                 self._release_delivery_slot(delivery_slot_key)
@@ -617,6 +628,110 @@ class NewMemberForwarderPlugin(Star):
         group_id: str = "",
     ) -> None:
         await self._deliver_private_with_retries(bot, user_id, items, self_id, group_id)
+
+    def _next_delivery_job_seq(self) -> int:
+        self._delivery_job_seq += 1
+        return self._delivery_job_seq
+
+    def _ensure_delivery_queue(self) -> asyncio.Queue[dict[str, Any]]:
+        if self._delivery_queue is None:
+            max_size = max(0, self._get_int("delivery_queue_max_size", 0))
+            self._delivery_queue = asyncio.Queue(maxsize=max_size)
+        if self._delivery_worker_task is None or self._delivery_worker_task.done():
+            self._delivery_worker_task = asyncio.create_task(self._delivery_queue_worker())
+        return self._delivery_queue
+
+    def _enqueue_delivery_job(self, job: dict[str, Any]) -> bool:
+        queue = self._ensure_delivery_queue()
+        user_id = self._string(job.get("user_id"))
+        group_id = self._string(job.get("group_id"))
+        try:
+            queue.put_nowait(job)
+        except asyncio.QueueFull:
+            self._delivery_queue_stats["dropped"] = int(self._delivery_queue_stats.get("dropped") or 0) + 1
+            logger.error(
+                "new_member_forwarder: delivery queue is full; drop user %s in group %s. "
+                "Increase delivery_queue_max_size if many users join at the same time.",
+                user_id,
+                group_id or "-",
+            )
+            return False
+
+        self._delivery_queue_stats["enqueued"] = int(self._delivery_queue_stats.get("enqueued") or 0) + 1
+        logger.info(
+            "new_member_forwarder: enqueued delivery job #%s for user %s in group %s; queue_size=%s.",
+            job.get("seq") or "-",
+            user_id,
+            group_id or "-",
+            queue.qsize(),
+        )
+        return True
+
+    async def _delivery_queue_worker(self) -> None:
+        logger.info("new_member_forwarder: delivery queue worker started.")
+        queue = self._ensure_delivery_queue()
+        while True:
+            job = await queue.get()
+            try:
+                await self._run_delivery_queue_job(job)
+            finally:
+                queue.task_done()
+
+    async def _run_delivery_queue_job(self, job: dict[str, Any]) -> None:
+        user_id = self._string(job.get("user_id"))
+        group_id = self._string(job.get("group_id"))
+        self_id = self._string(job.get("self_id"))
+        slot_key = self._string(job.get("delivery_slot_key"))
+        seq = job.get("seq") or "-"
+        created_at = self._safe_float(job.get("created_at"), time.time())
+        not_before = self._safe_float(job.get("not_before"), 0.0)
+        bot = job.get("bot")
+        items = job.get("items") if isinstance(job.get("items"), list) else []
+
+        try:
+            delay = not_before - time.time()
+            if delay > 0:
+                logger.info(
+                    "new_member_forwarder: delivery job #%s for user %s in group %s waits %.1fs before processing.",
+                    seq,
+                    user_id,
+                    group_id or "-",
+                    delay,
+                )
+                await asyncio.sleep(delay)
+
+            logger.info(
+                "new_member_forwarder: delivery job #%s started for user %s in group %s after %.1fs in queue.",
+                seq,
+                user_id,
+                group_id or "-",
+                time.time() - created_at,
+            )
+            await self._deliver_private_with_retries(bot, user_id, items, self_id, group_id)
+            if slot_key:
+                self._mark_delivery_success(group_id, user_id)
+            self._delivery_queue_stats["completed"] = int(self._delivery_queue_stats.get("completed") or 0) + 1
+            logger.info(
+                "new_member_forwarder: delivery job #%s completed for user %s in group %s.",
+                seq,
+                user_id,
+                group_id or "-",
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self._delivery_queue_stats["failed"] = int(self._delivery_queue_stats.get("failed") or 0) + 1
+            logger.exception(
+                "new_member_forwarder: delivery job #%s failed for user %s in group %s; "
+                "delivery was not counted: %s",
+                seq,
+                user_id,
+                group_id or "-",
+                self._short_error(exc),
+            )
+        finally:
+            if slot_key:
+                self._release_delivery_slot(slot_key)
 
     async def _deliver_private_with_retries(
         self,
@@ -2414,6 +2529,26 @@ class NewMemberForwarderPlugin(Star):
         return str(value).strip()
 
     async def terminate(self):
+        if self._delivery_worker_task and not self._delivery_worker_task.done():
+            self._delivery_worker_task.cancel()
+            try:
+                await self._delivery_worker_task
+            except asyncio.CancelledError:
+                pass
+            except Exception as exc:
+                logger.warning("new_member_forwarder: delivery queue worker stopped with error: %s", exc)
+        self._delivery_worker_task = None
+        if self._delivery_queue is not None:
+            while True:
+                try:
+                    job = self._delivery_queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+                slot_key = self._string(job.get("delivery_slot_key"))
+                if slot_key:
+                    self._release_delivery_slot(slot_key)
+                self._delivery_queue.task_done()
+
         for task in self._image_tasks.values():
             task.cancel()
         self._image_tasks.clear()
