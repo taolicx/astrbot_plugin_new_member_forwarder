@@ -30,7 +30,7 @@ class TempSessionNotReadyError(RuntimeError):
     PLUGIN_NAME,
     "Codex",
     "管理员私聊录制新人入群资料，新人进群时自动私聊转发文字、图片和聊天记录。",
-    "1.4.29",
+    "1.4.34",
 )
 class NewMemberForwarderPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig | None = None):
@@ -1478,12 +1478,29 @@ Add-Type -AssemblyName UIAutomationTypes
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -TypeDefinition @"
 using System;
+using System.Text;
 using System.Runtime.InteropServices;
 public class NmfHumanWin32 {
+  public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+  [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
+  [DllImport("user32.dll")] public static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
   [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
   [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
   [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
   [DllImport("user32.dll")] public static extern bool ShowWindowAsync(IntPtr hWnd, int nCmdShow);
+  [DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern IntPtr SetActiveWindow(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern IntPtr SetFocus(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
+  [DllImport("user32.dll")] public static extern void SwitchToThisWindow(IntPtr hWnd, bool fAltTab);
+  [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool fAttach);
+  [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
+  [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern int GetWindowTextLength(IntPtr hWnd);
+  [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetWindowText(IntPtr hWnd, StringBuilder text, int count);
+  [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetClassName(IntPtr hWnd, StringBuilder text, int count);
+  [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hWnd, out RECT rect);
   [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
   [DllImport("user32.dll")] public static extern void mouse_event(uint flags, uint dx, uint dy, uint data, UIntPtr extra);
   [DllImport("user32.dll")] public static extern void keybd_event(byte vk, byte scan, uint flags, UIntPtr extra);
@@ -1668,10 +1685,116 @@ function Click-NearLeftOfElement($element) {
   return $false
 }
 
+function Get-WindowTextValue([IntPtr]$hWnd) {
+  try {
+    $len = [NmfHumanWin32]::GetWindowTextLength($hWnd)
+    $sb = New-Object System.Text.StringBuilder ([Math]::Max(1, $len + 1))
+    [NmfHumanWin32]::GetWindowText($hWnd, $sb, $sb.Capacity) | Out-Null
+    return $sb.ToString()
+  } catch {}
+  return ''
+}
+
+function Get-WindowClassNameValue([IntPtr]$hWnd) {
+  try {
+    $sb = New-Object System.Text.StringBuilder 256
+    [NmfHumanWin32]::GetClassName($hWnd, $sb, $sb.Capacity) | Out-Null
+    return $sb.ToString()
+  } catch {}
+  return ''
+}
+
+function Get-WindowRectInfo([IntPtr]$hWnd) {
+  try {
+    $rect = New-Object NmfHumanWin32+RECT
+    if ([NmfHumanWin32]::GetWindowRect($hWnd, [ref]$rect)) {
+      return [pscustomobject]@{
+        Left = $rect.Left
+        Top = $rect.Top
+        Width = $rect.Right - $rect.Left
+        Height = $rect.Bottom - $rect.Top
+      }
+    }
+  } catch {}
+  return [pscustomobject]@{ Left = 0; Top = 0; Width = 0; Height = 0 }
+}
+
+function Test-UsableQQWindowHandle([IntPtr]$hWnd) {
+  if ($hWnd -eq [IntPtr]::Zero) { return $false }
+  $rect = Get-WindowRectInfo $hWnd
+  if ($rect.Width -lt 260 -or $rect.Height -lt 220) { return $false }
+  if ($rect.Left -lt -5000 -or $rect.Top -lt -5000) { return $false }
+  $className = Get-WindowClassNameValue $hWnd
+  if ($className -eq 'Chrome_WidgetWin_0') { return $false }
+  if ($className -and $className -notmatch 'Chrome_WidgetWin_1') { return $false }
+  return $true
+}
+
+function Add-QQWindowElement($result, $seen, [IntPtr]$hWnd) {
+  if (-not (Test-UsableQQWindowHandle $hWnd)) { return }
+  $key = $hWnd.ToInt64()
+  if ($seen.Contains($key)) { return }
+  try {
+    $element = [System.Windows.Automation.AutomationElement]::FromHandle($hWnd)
+    if ($element -eq $null) { return }
+    $rect = $element.Current.BoundingRectangle
+    if ($rect.Width -lt 260 -or $rect.Height -lt 220) { return }
+    [void]$result.Add($element)
+    [void]$seen.Add($key)
+  } catch {}
+}
+
+function Get-QQWindowSortKey($win) {
+  try {
+    $rect = $win.Current.BoundingRectangle
+    $area = [int]($rect.Width * $rect.Height)
+    $name = Get-ElementName $win
+    $bonus = 0
+    if ($name -notmatch '资料卡|Profile') { $bonus += 100000000 }
+    if ($rect.Width -ge 600 -and $rect.Height -ge 450) { $bonus += 50000000 }
+    return $bonus + $area
+  } catch {}
+  return 0
+}
+
+function Force-ForegroundWindow([IntPtr]$hWnd) {
+  try {
+    [NmfHumanWin32]::ShowWindowAsync($hWnd, 9) | Out-Null
+    Start-Sleep -Milliseconds 100
+    [NmfHumanWin32]::keybd_event(0x12, 0, 0, [UIntPtr]::Zero)
+    Start-Sleep -Milliseconds 35
+    [NmfHumanWin32]::keybd_event(0x12, 0, 2, [UIntPtr]::Zero)
+    $foreground = [NmfHumanWin32]::GetForegroundWindow()
+    $foregroundPid = [uint32]0
+    $targetPid = [uint32]0
+    $foregroundThread = [NmfHumanWin32]::GetWindowThreadProcessId($foreground, [ref]$foregroundPid)
+    $targetThread = [NmfHumanWin32]::GetWindowThreadProcessId($hWnd, [ref]$targetPid)
+    $currentThread = [NmfHumanWin32]::GetCurrentThreadId()
+    if ($foregroundThread -ne 0) { [NmfHumanWin32]::AttachThreadInput($currentThread, $foregroundThread, $true) | Out-Null }
+    if ($targetThread -ne 0) { [NmfHumanWin32]::AttachThreadInput($currentThread, $targetThread, $true) | Out-Null }
+    [NmfHumanWin32]::SetWindowPos($hWnd, [IntPtr](-1), 0, 0, 0, 0, 0x0001 -bor 0x0002 -bor 0x0040) | Out-Null
+    Start-Sleep -Milliseconds 80
+    [NmfHumanWin32]::SetWindowPos($hWnd, [IntPtr](-2), 0, 0, 0, 0, 0x0001 -bor 0x0002 -bor 0x0040) | Out-Null
+    [NmfHumanWin32]::BringWindowToTop($hWnd) | Out-Null
+    [NmfHumanWin32]::SetActiveWindow($hWnd) | Out-Null
+    [NmfHumanWin32]::SetFocus($hWnd) | Out-Null
+    [NmfHumanWin32]::SetForegroundWindow($hWnd) | Out-Null
+    try { [NmfHumanWin32]::SwitchToThisWindow($hWnd, $true) } catch {}
+    if ($targetThread -ne 0) { [NmfHumanWin32]::AttachThreadInput($currentThread, $targetThread, $false) | Out-Null }
+    if ($foregroundThread -ne 0) { [NmfHumanWin32]::AttachThreadInput($currentThread, $foregroundThread, $false) | Out-Null }
+    Start-Sleep -Milliseconds 280
+    return $true
+  } catch {}
+  return $false
+}
+
 function Focus-Window($win) {
   try {
-    [NmfHumanWin32]::ShowWindowAsync([IntPtr]$win.Current.NativeWindowHandle, 5) | Out-Null
-    [NmfHumanWin32]::SetForegroundWindow([IntPtr]$win.Current.NativeWindowHandle) | Out-Null
+    $hWnd = [IntPtr]$win.Current.NativeWindowHandle
+    if (-not (Force-ForegroundWindow $hWnd)) {
+      [NmfHumanWin32]::ShowWindowAsync($hWnd, 9) | Out-Null
+      [NmfHumanWin32]::SetForegroundWindow($hWnd) | Out-Null
+    }
     Start-Sleep -Milliseconds 350
     return $true
   } catch {}
@@ -1689,17 +1812,37 @@ function Get-QQWindows {
     } catch {}
   }
   if ($allPids.Count -eq 0) { return @() }
-  $root = [System.Windows.Automation.AutomationElement]::RootElement
-  $children = $root.FindAll([System.Windows.Automation.TreeScope]::Children, [System.Windows.Automation.Condition]::TrueCondition)
   $result = New-Object System.Collections.ArrayList
-  foreach ($win in $children) {
+  $seen = New-Object System.Collections.ArrayList
+  try {
+    $root = [System.Windows.Automation.AutomationElement]::RootElement
+    $children = $root.FindAll([System.Windows.Automation.TreeScope]::Children, [System.Windows.Automation.Condition]::TrueCondition)
+    foreach ($win in $children) {
+      try {
+        if ($allPids.Contains($win.Current.ProcessId) -and $win.Current.NativeWindowHandle -ne 0) {
+          Add-QQWindowElement $result $seen ([IntPtr]$win.Current.NativeWindowHandle)
+        }
+      } catch {}
+    }
+  } catch {}
+  foreach ($proc in @(Get-Process QQ -ErrorAction SilentlyContinue)) {
     try {
-      if ($allPids.Contains($win.Current.ProcessId) -and $win.Current.NativeWindowHandle -ne 0) {
-        [void]$result.Add($win)
+      if ($proc.MainWindowHandle -and $proc.MainWindowHandle -ne 0) {
+        Add-QQWindowElement $result $seen ([IntPtr]$proc.MainWindowHandle)
       }
     } catch {}
   }
-  return @($result)
+  $callback = [NmfHumanWin32+EnumWindowsProc]{
+    param([IntPtr]$hWnd, [IntPtr]$lParam)
+    $procId = [uint32]0
+    [NmfHumanWin32]::GetWindowThreadProcessId($hWnd, [ref]$procId) | Out-Null
+    if ($allPids.Contains([int]$procId)) {
+      Add-QQWindowElement $result $seen $hWnd
+    }
+    return $true
+  }
+  try { [NmfHumanWin32]::EnumWindows($callback, [IntPtr]::Zero) | Out-Null } catch {}
+  return @($result | Sort-Object { Get-QQWindowSortKey $_ } -Descending)
 }
 
 function Get-QQProcessCount {
@@ -1802,7 +1945,7 @@ function Try-OpenGroupFromQQSearch([string[]]$groupHints, [bool]$requireGroupHin
     Clear-And-TypeQuery $query
     Press-Key 0x0D
     Start-Sleep -Milliseconds 1300
-    $verified = Find-GroupWindow $groupHints $requireGroupHint
+    $verified = Find-GroupWindow $groupHints $true
     if ($verified -ne $null) { return $verified }
     if (Is-SingleQQMode) {
       Write-Stage 'group_search_single_qq_fallback'
@@ -1895,23 +2038,58 @@ function Find-TargetElement($root, [string[]]$targetHints) {
   return $best
 }
 
+function Window-HasTargetHint($root, [string[]]$targetHints) {
+  if (Element-Has-Hint $root $targetHints) { return $true }
+  $target = Find-TargetElement $root $targetHints
+  return ($target -ne $null)
+}
+
+function Get-NativeWindowHandleValue($win) {
+  try { return [int64]$win.Current.NativeWindowHandle } catch {}
+  return 0
+}
+
 function Try-SearchTargetInGroup($groupWin, [string]$targetName, [string]$targetUserId) {
   if (-not (Is-True $env:NMF_MEMBER_SEARCH)) { return $false }
-  $query = $targetName
-  if (-not $query) { $query = $targetUserId }
-  if (-not $query) { return $false }
-  Focus-Window $groupWin | Out-Null
-  Press-CtrlKey 0x46
-  Start-Sleep -Milliseconds 300
-  Paste-TextOnly $query | Out-Null
-  Start-Sleep -Milliseconds 900
+  $queries = New-Object System.Collections.ArrayList
+  foreach ($query in @($targetName, $targetUserId)) {
+    $value = ($query + '').Trim()
+    if ($value -and -not $queries.Contains($value)) { [void]$queries.Add($value) }
+  }
+  if ($queries.Count -eq 0) { return $false }
+  foreach ($query in $queries) {
+    Focus-Window $groupWin | Out-Null
+    Press-CtrlKey 0x46
+    Start-Sleep -Milliseconds 300
+    Clear-And-TypeQuery $query
+    Write-Stage 'member_search_pasted'
+    Start-Sleep -Milliseconds 700
+    Press-Key 0x0D
+    Write-Stage 'member_search_enter'
+    Start-Sleep -Milliseconds 950
+    Press-Key 0x0D
+    Write-Stage 'member_search_enter_second'
+    Start-Sleep -Milliseconds 650
+  }
   return $true
 }
 
 function Find-SendButton($root, [string]$buttonRegex) {
   try {
     Write-Stage 'scan_send_button'
-    $all = $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, (Get-ControlViewCondition))
+    foreach ($name in @('发消息', '发送消息', '聊天', '私聊')) {
+      try {
+        $cond = New-Object System.Windows.Automation.PropertyCondition -ArgumentList ([System.Windows.Automation.AutomationElement]::NameProperty, $name)
+        $direct = $root.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $cond)
+        if ($direct -ne $null) { return $direct }
+      } catch {}
+    }
+    Write-Stage 'scan_send_button_typed'
+    $buttonCond = New-Object System.Windows.Automation.PropertyCondition -ArgumentList ([System.Windows.Automation.AutomationElement]::ControlTypeProperty, [System.Windows.Automation.ControlType]::Button)
+    $linkCond = New-Object System.Windows.Automation.PropertyCondition -ArgumentList ([System.Windows.Automation.AutomationElement]::ControlTypeProperty, [System.Windows.Automation.ControlType]::Hyperlink)
+    $textCond = New-Object System.Windows.Automation.PropertyCondition -ArgumentList ([System.Windows.Automation.AutomationElement]::ControlTypeProperty, [System.Windows.Automation.ControlType]::Text)
+    $condition = New-Object System.Windows.Automation.OrCondition -ArgumentList @($buttonCond, $linkCond, $textCond)
+    $all = $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, $condition)
     foreach ($item in $all) {
       $name = Get-ElementName $item
       if (-not $name) { continue }
@@ -1925,7 +2103,7 @@ function Find-SendButton($root, [string]$buttonRegex) {
 
 function Try-ClickSendMessageButton([string[]]$targetHints, [string]$buttonRegex, [bool]$requireTargetHint) {
   foreach ($win in (Get-QQWindows)) {
-    if ($requireTargetHint -and -not (Element-Has-Hint $win $targetHints)) { continue }
+    if ($requireTargetHint -and -not (Window-HasTargetHint $win $targetHints)) { continue }
     $button = Find-SendButton $win $buttonRegex
     if ($button -ne $null) {
       Focus-Window $win | Out-Null
@@ -1938,15 +2116,81 @@ function Try-ClickSendMessageButton([string[]]$targetHints, [string]$buttonRegex
   return $false
 }
 
-function Try-PasteIntoOpenedTargetChat([string[]]$targetHints, [string[]]$groupHints, [bool]$requireTargetHint, [string]$text) {
+function Try-PasteIntoOpenedTargetChat([string[]]$targetHints, [string[]]$groupHints, [bool]$requireTargetHint, [string]$text, [int64]$excludeHandle) {
   foreach ($win in (Get-QQWindows)) {
-    $hasTarget = Element-Has-Hint $win $targetHints
+    $handle = Get-NativeWindowHandleValue $win
+    if ($excludeHandle -and $handle -eq $excludeHandle) { continue }
+    $hasTarget = Window-HasTargetHint $win $targetHints
     if ($requireTargetHint -and -not $hasTarget) { continue }
     if (Element-Has-Hint $win $groupHints) { continue }
     Focus-Window $win | Out-Null
     if (Paste-And-Enter $text) { return $true }
   }
   return $false
+}
+
+function Click-At([int]$x, [int]$y) {
+  try {
+    [NmfHumanWin32]::SetCursorPos($x, $y) | Out-Null
+    Start-Sleep -Milliseconds 80
+    [NmfHumanWin32]::mouse_event(2, 0, 0, 0, [UIntPtr]::Zero)
+    Start-Sleep -Milliseconds 70
+    [NmfHumanWin32]::mouse_event(4, 0, 0, 0, [UIntPtr]::Zero)
+    Start-Sleep -Milliseconds 180
+    return $true
+  } catch {}
+  return $false
+}
+
+function Try-ClickProfileSendButtonByCoordinate([string]$text) {
+  foreach ($win in (Get-QQWindows)) {
+    $name = Get-ElementName $win
+    if ($name -notmatch '资料卡|Profile') { continue }
+    $profileHandle = Get-NativeWindowHandleValue $win
+    try {
+      $rect = $win.Current.BoundingRectangle
+      if ($rect.Width -lt 260 -or $rect.Height -lt 260) { continue }
+      Focus-Window $win | Out-Null
+      foreach ($point in @(
+        @{ X = 0.50; Bottom = 42 },
+        @{ X = 0.50; Bottom = 64 },
+        @{ X = 0.72; Bottom = 42 }
+      )) {
+        Write-Stage 'profile_card_coordinate_button'
+        $x = [int]($rect.Left + ($rect.Width * [double]$point.X))
+        $y = [int]($rect.Bottom - [double]$point.Bottom)
+        if (-not (Click-At $x $y)) { continue }
+        Start-Sleep -Milliseconds 900
+        $foregroundHandle = [NmfHumanWin32]::GetForegroundWindow().ToInt64()
+        if ($profileHandle -and $foregroundHandle -eq $profileHandle) { continue }
+        Write-Stage 'paste_after_profile_card_coordinate'
+        if (Paste-And-Enter $text) { return $true }
+      }
+    } catch {}
+  }
+  return $false
+}
+
+function Try-SendFromTargetContext([string[]]$targetHints, [string[]]$groupHints, [string]$buttonRegex, [bool]$requireTargetHint, [string]$text, $groupWin) {
+  $groupHandle = Get-NativeWindowHandleValue $groupWin
+  if (Is-SingleQQMode) {
+    Write-Stage 'single_qq_context_button_first'
+    if (Try-ClickProfileSendButtonByCoordinate $text) {
+      return 'sent_after_profile_card_coordinate_button'
+    }
+    if (Try-ClickSendMessageButton $targetHints $buttonRegex $false) {
+      Write-Stage 'paste_after_single_qq_context_button'
+      if (Paste-And-Enter $text) { return 'sent_after_single_qq_context_button' }
+    }
+  }
+  if (Try-ClickSendMessageButton $targetHints $buttonRegex $requireTargetHint) {
+    Write-Stage 'paste_after_context_button'
+    if (Paste-And-Enter $text) { return 'sent_after_context_button' }
+  }
+  if (Try-PasteIntoOpenedTargetChat $targetHints $groupHints $requireTargetHint $text $groupHandle) {
+    return 'sent_after_context_chat'
+  }
+  return ''
 }
 
 $text = $env:NMF_WARMUP_TEXT
@@ -1984,7 +2228,11 @@ $searchedGroup = $false
 while ((Get-Date) -lt $deadline -and $groupWin -eq $null) {
   Write-Stage 'find_group_loop'
   Close-UnsupportedQQDialog | Out-Null
-  $groupWin = Find-GroupWindow $groupHints $requireGroupHint
+  $lookupRequiresHint = $requireGroupHint
+  if (-not $searchedGroup -and (Is-True $env:NMF_GROUP_SEARCH)) {
+    $lookupRequiresHint = $true
+  }
+  $groupWin = Find-GroupWindow $groupHints $lookupRequiresHint
   if ($groupWin -eq $null -and -not $searchedGroup) {
     Write-Stage 'group_search'
     $searchedGroup = $true
@@ -2013,6 +2261,15 @@ $searched = $false
 if (Is-True $env:NMF_MEMBER_SEARCH) {
   Write-Stage 'member_search_initial'
   $searched = Try-SearchTargetInGroup $groupWin $targetName $targetUserId
+  if ($searched) {
+    Write-Stage 'after_member_search_context_probe'
+    $sentReason = Try-SendFromTargetContext $targetHints $groupHints $buttonRegex $requireTargetHint $text $groupWin
+    if ($sentReason) {
+      Out-Result $true $sentReason 'send_button'
+      exit 0
+    }
+    Focus-Window $groupWin | Out-Null
+  }
 }
 while ((Get-Date) -lt $deadline) {
   Write-Stage 'find_target_loop'
@@ -2050,7 +2307,7 @@ while ((Get-Date) -lt $deadline) {
           exit 0
         }
       }
-      if (Try-PasteIntoOpenedTargetChat $targetHints $groupHints $requireTargetHint $text) {
+      if (Try-PasteIntoOpenedTargetChat $targetHints $groupHints $requireTargetHint $text (Get-NativeWindowHandleValue $groupWin)) {
         Out-Result $true 'sent_after_group_member_double_click_chat' 'direct_chat'
         exit 0
       }
