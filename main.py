@@ -28,7 +28,7 @@ WARMUP_IMAGE_ASSET_KEY = "warmup"
     PLUGIN_NAME,
     "Codex",
     "管理员私聊录制新人入群资料，新人进群时自动私聊转发文字、图片和聊天记录。",
-    "1.4.66",
+    "1.4.67",
 )
 class NewMemberForwarderPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig | None = None):
