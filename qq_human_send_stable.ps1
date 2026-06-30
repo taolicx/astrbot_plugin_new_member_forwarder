@@ -559,8 +559,9 @@ $script:MainHandleValue = $main.HandleValue
 [void]$steps.Add("maximized")
 Write-TraceStage "maximized"
 
-# Conversation rows are stable after the target group is pinned.
-$groupX = $main.Left + [int]([Math]::Min(360, [Math]::Max(220, $main.Width * 0.16)))
+# Conversation rows are stable after the target group is pinned. Click the avatar/title area,
+# not the right-side timestamp/mute area.
+$groupX = $main.Left + [int]([Math]::Min(230, [Math]::Max(140, $main.Width * 0.07)))
 $groupY = $main.Top + $GroupBaseY + (($GroupRow - 1) * 95)
 Write-TraceStage ("click-group x=" + $groupX + " y=" + $groupY)
 Click-At $groupX $groupY
@@ -572,6 +573,17 @@ if ($TargetQQ) {
   Write-TraceStage "check-group-panel-target"
   $groupScore = Wait-ForGroupPanel $main $WaitSeconds
   Write-TraceStage ("group-panel-score=" + ($groupScore | ConvertTo-Json -Compress))
+  if ($groupScore.Score -eq 0 -and $groupScore.Ratio -eq 0) {
+    $retryGroupX = $main.Left + 170
+    Write-TraceStage ("retry-click-group x=" + $retryGroupX + " y=" + $groupY)
+    Click-At $retryGroupX $groupY
+    Start-Sleep -Milliseconds 1200
+    $main = Get-MainQQWindow
+    $script:MainHandleValue = $main.HandleValue
+    [void]$shots.Add((Save-Shot $main "02b-after-group-retry.png"))
+    $groupScore = Wait-ForGroupPanel $main 3
+    Write-TraceStage ("group-panel-retry-score=" + ($groupScore | ConvertTo-Json -Compress))
+  }
   [void]$steps.Add("group-panel-ok")
 } else {
   Write-TraceStage "check-group-panel-probe"
@@ -588,8 +600,11 @@ if ($TargetQQ) {
 $usedMemberSearch = $false
 if ($TargetQQ) {
   $usedMemberSearch = $true
-  $searchIconX = $main.Left + $main.Width - 31
-  foreach ($searchIconY in @($main.Top + 246, $main.Top + 258, $main.Top + 264, $main.Top + 276)) {
+  $mainLeft = [int]$main.Left
+  $mainTop = [int]$main.Top
+  $mainWidth = [int]$main.Width
+  $searchIconX = $mainLeft + $mainWidth - 31
+  foreach ($searchIconY in @(($mainTop + 246), ($mainTop + 258), ($mainTop + 264), ($mainTop + 276))) {
     Write-TraceStage ("click-member-search x=" + $searchIconX + " y=" + $searchIconY)
     Click-At $searchIconX $searchIconY
     Start-Sleep -Milliseconds 180
