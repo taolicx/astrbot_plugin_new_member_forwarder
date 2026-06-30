@@ -28,7 +28,7 @@ WARMUP_IMAGE_ASSET_KEY = "warmup"
     PLUGIN_NAME,
     "Codex",
     "管理员私聊录制新人入群资料，新人进群时自动私聊转发文字、图片和聊天记录。",
-    "1.4.67",
+    "1.4.68",
 )
 class NewMemberForwarderPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig | None = None):
@@ -397,7 +397,8 @@ class NewMemberForwarderPlugin(Star):
 
         yield event.plain_result(
             "开始 QQ 坐标校准。\n"
-            "请看电脑桌面的校准提示窗：把鼠标放到目标位置后按 F8，按 ESC 可取消。"
+            "请看电脑桌面的校准提示窗：按提示依次校准置顶群、群成员搜索框、第一条搜索结果、私聊输入框。\n"
+            "现在校准流程会右键第一条搜索结果并选择“发送消息”，不再校准资料卡发消息按钮。"
         )
         timeout = max(60.0, self._get_float("qq_human_group_warmup_calibration_timeout_seconds", 300.0))
         try:
