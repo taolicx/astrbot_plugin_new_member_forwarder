@@ -31,7 +31,7 @@ class TempSessionNotReadyError(RuntimeError):
     PLUGIN_NAME,
     "Codex",
     "管理员私聊录制新人入群资料，新人进群时自动私聊转发文字、图片和聊天记录。",
-    "1.4.19",
+    "1.4.20",
 )
 class NewMemberForwarderPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig | None = None):
@@ -48,6 +48,7 @@ class NewMemberForwarderPlugin(Star):
         self._qq_protocol_warmup_last_at: dict[str, float] = {}
         self._qq_desktop_warmup_last_at: dict[str, float] = {}
         self._qq_desktop_warmup_sent_at: dict[str, float] = {}
+        self._test_delivery_running_until = 0.0
         self.data_dir = self._resolve_data_dir()
         self.media_dir = self.data_dir / "media"
         self.record_file = self.data_dir / "recorded_material.json"
@@ -254,47 +255,69 @@ class NewMemberForwarderPlugin(Star):
     @filter.platform_adapter_type(filter.PlatformAdapterType.AIOCQHTTP)
     @filter.command("新人欢迎测试")
     async def test_delivery(self, event: AstrMessageEvent, target_qq: str = "", source_group_id: str = ""):
-        if not self._is_admin(self._string(event.get_sender_id())):
+        if not self._can_run_admin_or_self_command(event):
             return
 
+        message = await self._run_test_delivery(event, target_qq, source_group_id)
+        if message:
+            yield event.plain_result(message)
+
+    @filter.platform_adapter_type(filter.PlatformAdapterType.AIOCQHTTP)
+    @filter.event_message_type(filter.EventMessageType.ALL, priority=900)
+    async def self_sent_test_delivery(self, event: AstrMessageEvent):
+        if not self._is_self_sender(event):
+            return
+        if getattr(event, "is_at_or_wake_command", False):
+            return
+        command_args = self._parse_self_test_command(event.get_message_str())
+        if command_args is None:
+            return
+        if time.time() < self._test_delivery_running_until:
+            return
+
+        target_qq, source_group_id = command_args
+        message = await self._run_test_delivery(event, target_qq, source_group_id)
+        if message:
+            self._stop_event(event)
+            yield event.plain_result(message)
+
+    async def _run_test_delivery(self, event: AstrMessageEvent, target_qq: str = "", source_group_id: str = "") -> str:
         user_id = self._string(target_qq or event.get_sender_id())
         group_id = self._string(source_group_id or event.get_group_id())
         payload = self._load_recorded_payload()
         items = payload.get("items") or []
         if not items:
-            yield event.plain_result("还没有保存新人资料。请私聊发送“开始”录制。")
-            return
+            return "还没有保存新人资料。请私聊发送“开始”录制。"
 
         bot = getattr(event, "bot", None)
         if not bot:
-            yield event.plain_result("当前事件没有 OneBot bot 实例，无法测试发送。")
-            return
+            return "当前事件没有 OneBot bot 实例，无法测试发送。"
 
+        self._test_delivery_running_until = time.time() + 300.0
         try:
             await self._deliver_private_with_retries(bot, user_id, items, event.get_self_id(), group_id)
         except Exception as exc:
             if isinstance(exc, TempSessionNotReadyError):
-                yield event.plain_result(
+                return (
                     f"测试发送失败：LLBot 当前没有在群 {group_id or '未知'} 的成员列表里确认 QQ {user_id}。\n"
                     "处理：确认这是机器人所在的来源群，或等 QQ/LLBot 群成员同步后再测。"
                 )
-                return
             if self._is_friend_required_error(exc):
                 logger.warning(
                     "new_member_forwarder: QQ refused test private delivery to %s from group %s: temporary private session rejected.",
                     user_id,
                     group_id,
                 )
-                yield event.plain_result(
+                return (
                     f"测试发送失败：QQ/LLBot 拒绝给 QQ {user_id} 发群临时私聊。\n"
                     "处理：确认命令里带的是机器人和对方共同所在的来源群号，并确认对方允许群临时会话。"
                 )
-                return
             logger.exception("new_member_forwarder: test delivery failed: %s", exc)
-            yield event.plain_result(f"测试发送失败：{exc}")
-            return
+            return f"测试发送失败：{exc}"
+        finally:
+            self._test_delivery_running_until = time.time() + 5.0
 
-        yield event.plain_result(f"已私聊 QQ {user_id} 执行一次测试发送。")
+        return f"已私聊 QQ {user_id} 执行一次测试发送。"
 
     @filter.platform_adapter_type(filter.PlatformAdapterType.AIOCQHTTP)
     @filter.command("新人欢迎开路测试")
@@ -2504,6 +2527,30 @@ Out-Result $false 'target_qq_window_or_send_button_not_found' 'wait'
         admins = [self._string(item) for item in self._get_list("admin_user_ids")]
         admins = [item for item in admins if item]
         return not admins or user_id in admins
+
+    def _is_self_sender(self, event: AstrMessageEvent) -> bool:
+        sender_id = self._string(event.get_sender_id())
+        self_id = self._string(event.get_self_id())
+        return bool(sender_id and self_id and sender_id == self_id)
+
+    def _can_run_admin_or_self_command(self, event: AstrMessageEvent) -> bool:
+        sender_id = self._string(event.get_sender_id())
+        return self._is_admin(sender_id) or self._is_self_sender(event)
+
+    def _parse_self_test_command(self, text: str) -> tuple[str, str] | None:
+        text = self._normalize_control_text(text)
+        command = "新人欢迎测试"
+        if text == command:
+            return "", ""
+        if not text.startswith(command):
+            return None
+        remainder = text[len(command) :]
+        if remainder and not remainder[0].isspace():
+            return None
+        args = [item for item in re.split(r"\s+", remainder.strip()) if item]
+        target_qq = args[0] if len(args) >= 1 else ""
+        source_group_id = args[1] if len(args) >= 2 else ""
+        return target_qq, source_group_id
 
     def _raw_event(self, event: AstrMessageEvent) -> dict[str, Any]:
         raw = getattr(event.message_obj, "raw_message", None)
