@@ -44,14 +44,33 @@
   "qq_human_group_warmup_enabled": {
     "type": "bool",
     "description": "启用 QQ 真人开路",
-    "hint": "新人进群后，机器人会操控本机 QQ：打开置顶群、搜索新人 QQ、点发消息并发送开路文字。",
+    "hint": "新人进群后，机器人会操控本机 QQ：打开置顶群、搜索新人 QQ、点发消息并发送第一条开路文字或图片。",
     "default": true
+  },
+  "forward_warmup_message_type": {
+    "type": "string",
+    "description": "真人开路第一条类型",
+    "hint": "填“文字”或“图片”。选择图片时，会发送下方上传的真人开路图片，或私聊机器人发送“设置真人开路图片”录入的图片。",
+    "default": "文字"
   },
   "forward_warmup_message_text": {
     "type": "text",
     "description": "真人开路文字",
-    "hint": "这是发给新人的第一条文字，默认用于打通私聊链路。",
+    "hint": "当真人开路第一条类型为“文字”时发送。默认用于打通私聊链路。",
     "default": "欢迎进群"
+  },
+  "forward_warmup_message_image": {
+    "type": "file",
+    "description": "真人开路图片",
+    "hint": "当真人开路第一条类型为“图片”时发送。请直接上传本地图片，也可以私聊机器人发送“设置真人开路图片”后再发图录入。",
+    "default": [],
+    "file_types": [
+      "png",
+      "jpg",
+      "jpeg",
+      "gif",
+      "bmp"
+    ]
   },
   "qq_human_group_warmup_group_row": {
     "type": "float",
