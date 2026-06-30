@@ -27,7 +27,7 @@ MAX_IMAGE_DOWNLOAD_BYTES = 20 * 1024 * 1024
     PLUGIN_NAME,
     "Codex",
     "管理员私聊录制新人入群资料，新人进群时自动私聊转发文字、图片和聊天记录。",
-    "1.4.60",
+    "1.4.61",
 )
 class NewMemberForwarderPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig | None = None):
@@ -1011,7 +1011,7 @@ class NewMemberForwarderPlugin(Star):
         if data is None:
             data = self._json_from_powershell_stdout(stdout)
         if data is not None:
-            sent = bool(data.get("sent") or data.get("ok"))
+            sent = completed.returncode == 0 and bool(data.get("sent") or data.get("ok"))
             return {
                 "ok": sent,
                 "stage": "sent" if sent else self._string(data.get("stage") or data.get("mode") or "not_sent"),
@@ -1105,7 +1105,7 @@ class NewMemberForwarderPlugin(Star):
         if data is None:
             data = self._json_from_powershell_stdout(stdout)
         if data is not None:
-            ok = bool(data.get("ok"))
+            ok = completed.returncode == 0 and bool(data.get("ok"))
             return {
                 "ok": ok,
                 "stage": "calibrated" if ok else self._string(data.get("stage") or data.get("mode") or "not_calibrated"),
