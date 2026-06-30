@@ -21,13 +21,14 @@ except Exception:
 
 PLUGIN_NAME = "astrbot_plugin_new_member_forwarder"
 MAX_IMAGE_DOWNLOAD_BYTES = 20 * 1024 * 1024
+WARMUP_IMAGE_ASSET_KEY = "warmup"
 
 
 @register(
     PLUGIN_NAME,
     "Codex",
     "管理员私聊录制新人入群资料，新人进群时自动私聊转发文字、图片和聊天记录。",
-    "1.4.62",
+    "1.4.63",
 )
 class NewMemberForwarderPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig | None = None):
@@ -36,6 +37,7 @@ class NewMemberForwarderPlugin(Star):
         self.plugin_dir = Path(__file__).resolve().parent
         self._recent_events: dict[str, float] = {}
         self._recording_sessions: dict[str, dict[str, Any]] = {}
+        self._warmup_image_recording_sessions: dict[str, dict[str, Any]] = {}
         self._image_reply_recording_sessions: dict[str, dict[str, Any]] = {}
         self._image_buckets: dict[str, dict[str, Any]] = {}
         self._image_tasks: dict[str, asyncio.Task] = {}
@@ -88,6 +90,8 @@ class NewMemberForwarderPlugin(Star):
         if text in self._cancel_words():
             if self._recording_sessions.pop(sender_id, None) is not None:
                 yield event.plain_result("已取消本次录制，未覆盖已保存资料。")
+            elif self._warmup_image_recording_sessions.pop(sender_id, None) is not None:
+                yield event.plain_result("已取消添加真人开路图片。")
             elif self._image_reply_recording_sessions.pop(sender_id, None) is not None:
                 yield event.plain_result("已取消添加图片回复。")
             else:
@@ -123,6 +127,7 @@ class NewMemberForwarderPlugin(Star):
                 f"正在录制：{recording}\n"
                 f"本次已录：{current_count} 条\n"
                 f"已保存资料：{saved_count} 条\n"
+                f"正在添加真人开路图片：{'是' if sender_id in self._warmup_image_recording_sessions else '否'}\n"
                 f"正在添加图片回复：{'是' if sender_id in self._image_reply_recording_sessions else '否'}\n"
                 f"存储位置：{self.record_file}"
             )
@@ -138,6 +143,9 @@ class NewMemberForwarderPlugin(Star):
                 }
             )
             yield event.plain_result("已清空已保存的新人资料。")
+            return
+
+        if sender_id in self._warmup_image_recording_sessions:
             return
 
         session = self._recording_sessions.get(sender_id)
@@ -340,9 +348,10 @@ class NewMemberForwarderPlugin(Star):
 
         user_id = self._string(target_qq or event.get_sender_id())
         group_id = self._string(source_group_id or event.get_group_id())
-        text = self._string(self._get("forward_warmup_message_text", "欢迎进群")).strip()
-        if not text:
-            yield event.plain_result("真人开路消息为空，请先在后台设置“真人开路文字”。")
+        try:
+            self._warmup_message_material()
+        except ValueError as exc:
+            yield event.plain_result(f"真人开路消息配置无效：{exc}")
             return
         if not user_id.isdigit() or not group_id.isdigit():
             yield event.plain_result("用法：/新人欢迎真人开路测试 QQ号 来源群号")
@@ -412,6 +421,18 @@ class NewMemberForwarderPlugin(Star):
             yield result
 
     @filter.platform_adapter_type(filter.PlatformAdapterType.AIOCQHTTP)
+    @filter.command("设置真人开路图片", alias={"添加真人开路图片", "录入真人开路图片", "设置开路图片"})
+    async def add_warmup_image_asset(self, event: AstrMessageEvent):
+        async for result in self._add_warmup_image_asset_command(event):
+            yield result
+
+    @filter.platform_adapter_type(filter.PlatformAdapterType.AIOCQHTTP)
+    @filter.command("删除真人开路图片", alias={"移除真人开路图片", "恢复真人开路文字"})
+    async def delete_warmup_image_asset(self, event: AstrMessageEvent):
+        async for result in self._delete_warmup_image_asset_command(event):
+            yield result
+
+    @filter.platform_adapter_type(filter.PlatformAdapterType.AIOCQHTTP)
     @filter.command("删除一图回复图片", alias={"移除一图回复图片"})
     async def delete_one_image_reply_asset(self, event: AstrMessageEvent):
         async for result in self._delete_image_reply_asset_command(event, "one"):
@@ -428,8 +449,6 @@ class NewMemberForwarderPlugin(Star):
     async def private_image_reply(self, event: AstrMessageEvent):
         if not self._get_bool("enabled", True):
             return
-        if not self._get_bool("private_image_reply_enabled", True):
-            return
 
         sender_id = self._string(event.get_sender_id())
         if not sender_id:
@@ -437,6 +456,24 @@ class NewMemberForwarderPlugin(Star):
 
         text = self._normalize_control_text(event.get_message_str())
         image_segments = self._image_segments_from_event(event)
+
+        if self._is_admin(sender_id) and sender_id in self._warmup_image_recording_sessions:
+            if text in self._cancel_words() or self._is_warmup_image_command_text(text):
+                return
+            if not image_segments:
+                yield event.plain_result("这条没有识别到图片。请直接发送图片；发送“取消”可取消。")
+                return
+            asset = await self._extract_image_reply_asset(image_segments)
+            if not asset:
+                yield event.plain_result("这条图片保存失败，请重新发送图片。")
+                return
+            self._warmup_image_recording_sessions.pop(sender_id, None)
+            self._save_warmup_image_asset(asset, activate=True)
+            yield event.plain_result("已设置真人开路图片，并已把真人开路第一条类型切换为“图片”。")
+            return
+
+        if not self._get_bool("private_image_reply_enabled", True):
+            return
 
         if self._is_admin(sender_id) and sender_id in self._image_reply_recording_sessions:
             if text in self._cancel_words() or self._is_image_reply_command_text(text):
@@ -754,16 +791,29 @@ class NewMemberForwarderPlugin(Star):
     ) -> bool:
         if not force and not self._get_bool("qq_human_group_warmup_enabled", False):
             return False
-        text = self._string(self._get("forward_warmup_message_text", "欢迎进群")).strip()
-        if not text:
-            return False
         group_id = self._string(group_id)
         user_id = self._string(user_id)
         if not group_id.isdigit() or not user_id.isdigit():
             return False
 
-        now = time.time()
         key = f"{group_id}:{user_id}"
+        try:
+            material = self._warmup_message_material()
+        except ValueError as exc:
+            self._qq_human_group_warmup_results[key] = {
+                "ok": False,
+                "stage": "config",
+                "reason": self._short_error(exc),
+            }
+            logger.warning(
+                "new_member_forwarder: invalid human QQ group warmup config for user %s in group %s: %s",
+                user_id,
+                group_id,
+                self._short_error(exc),
+            )
+            return False
+
+        now = time.time()
         cooldown = max(0.0, self._get_float("qq_human_group_warmup_cooldown_seconds", 90.0))
         last_at = self._qq_human_group_warmup_last_at.get(key, 0.0)
         if not force and cooldown and now - last_at < cooldown:
@@ -782,7 +832,9 @@ class NewMemberForwarderPlugin(Star):
                 user_id,
                 target_name,
                 group_name,
-                text,
+                material["kind"],
+                material["message"],
+                material["image_path"],
                 timeout,
             )
         except subprocess.TimeoutExpired as exc:
@@ -936,7 +988,9 @@ class NewMemberForwarderPlugin(Star):
         script_path: Path,
         group_id: str,
         user_id: str,
-        text: str,
+        message_kind: str,
+        message: str,
+        image_path: str,
         timeout: float,
     ) -> dict[str, Any]:
         runtime_dir = self.data_dir / "runtime_scripts"
@@ -967,8 +1021,12 @@ class NewMemberForwarderPlugin(Star):
             str(max(1, int(self._get_float("qq_human_group_warmup_search_result_base_y", 322)))),
             "-TargetQQ",
             user_id,
+            "-MessageKind",
+            message_kind,
             "-Message",
-            text,
+            message,
+            "-ImagePath",
+            image_path,
             "-WaitSeconds",
             str(max(3, int(self._get_float("qq_human_group_warmup_wait_seconds", 20.0)))),
             "-OutDir",
@@ -1134,7 +1192,9 @@ class NewMemberForwarderPlugin(Star):
         user_id: str,
         target_name: str,
         group_name: str,
-        text: str,
+        message_kind: str,
+        message: str,
+        image_path: str,
         timeout: float,
     ) -> dict[str, Any]:
         verified_script = self._verified_qq_human_stable_script_path()
@@ -1144,7 +1204,15 @@ class NewMemberForwarderPlugin(Star):
                 "stage": "script",
                 "reason": "qq_human_send_stable.ps1 not found in plugin directory",
             }
-        return self._run_verified_qq_human_stable_script(verified_script, group_id, user_id, text, timeout)
+        return self._run_verified_qq_human_stable_script(
+            verified_script,
+            group_id,
+            user_id,
+            message_kind,
+            message,
+            image_path,
+            timeout,
+        )
 
 
     def _run_qq_human_group_warmup_script(
@@ -1153,7 +1221,9 @@ class NewMemberForwarderPlugin(Star):
         user_id: str,
         target_name: str,
         group_name: str,
-        text: str,
+        message_kind: str,
+        message: str,
+        image_path: str,
         timeout: float,
     ) -> dict[str, Any]:
         return self._run_qq_human_group_warmup_stable_script(
@@ -1161,7 +1231,9 @@ class NewMemberForwarderPlugin(Star):
             user_id,
             target_name,
             group_name,
-            text,
+            message_kind,
+            message,
+            image_path,
             timeout,
         )
 
@@ -1179,6 +1251,43 @@ class NewMemberForwarderPlugin(Star):
 
 
 
+
+    async def _add_warmup_image_asset_command(self, event: AstrMessageEvent):
+        sender_id = self._string(event.get_sender_id())
+        if not sender_id or not self._is_admin(sender_id):
+            return
+        if self._event_group_id(event):
+            yield event.plain_result("请私聊我设置真人开路图片。")
+            return
+
+        image_segments = self._image_segments_from_event(event)
+        if image_segments:
+            asset = await self._extract_image_reply_asset(image_segments)
+            if not asset:
+                yield event.plain_result("这条图片保存失败，请重新发送图片。")
+                return
+            self._warmup_image_recording_sessions.pop(sender_id, None)
+            self._save_warmup_image_asset(asset, activate=True)
+            yield event.plain_result("已设置真人开路图片，并已把真人开路第一条类型切换为“图片”。")
+            return
+
+        self._warmup_image_recording_sessions[sender_id] = {
+            "started_at": int(time.time()),
+        }
+        yield event.plain_result(
+            "开始设置真人开路图片。请直接把图片发给我，发送“取消”可取消。"
+        )
+
+    async def _delete_warmup_image_asset_command(self, event: AstrMessageEvent):
+        sender_id = self._string(event.get_sender_id())
+        if not sender_id or not self._is_admin(sender_id):
+            return
+        existed = self._delete_warmup_image_asset(restore_text=True)
+        yield event.plain_result(
+            "已删除真人开路图片，并已把真人开路第一条类型切换为“文字”。"
+            if existed
+            else "当前没有已添加的真人开路图片；已把真人开路第一条类型切换为“文字”。"
+        )
 
     async def _add_image_reply_asset_command(self, event: AstrMessageEvent, rule_kind: str):
         sender_id = self._string(event.get_sender_id())
@@ -1439,6 +1548,121 @@ class NewMemberForwarderPlugin(Star):
                 return image_file
         return ""
 
+    def _warmup_message_material(self) -> dict[str, str]:
+        kind = self._warmup_message_kind()
+        if kind == "image":
+            image_path = self._warmup_image_local_path()
+            if not image_path:
+                raise ValueError(
+                    "真人开路第一条已设置为图片，但没有找到可用本地图片；请后台上传图片，或私聊发送“设置真人开路图片”。"
+                )
+            return {"kind": "image", "message": "", "image_path": image_path}
+
+        text = self._string(self._get("forward_warmup_message_text", "欢迎进群")).strip()
+        if not text:
+            raise ValueError("真人开路文字为空，请先在后台设置“真人开路文字”。")
+        return {"kind": "text", "message": text, "image_path": ""}
+
+    def _warmup_message_kind(self) -> str:
+        raw = self._string(self._get("forward_warmup_message_type", "文字")).strip().lower()
+        if raw in {"image", "img", "pic", "picture", "图片", "图"}:
+            return "image"
+        return "text"
+
+    def _warmup_image_local_path(self) -> str:
+        sources = [
+            self._stored_warmup_image_asset(),
+            self._first_config_file_value(self._get("forward_warmup_message_image", [])),
+        ]
+        for source in sources:
+            path = self._local_file_path_from_source(source)
+            if path:
+                return path
+        return ""
+
+    def _local_file_path_from_source(self, source: str) -> str:
+        source = self._string(source)
+        if not source:
+            return ""
+        if source.startswith(("http://", "https://", "base64://", "data:")):
+            return ""
+
+        candidates: list[Path]
+        if source.startswith("file://"):
+            parsed = urllib.parse.urlparse(source)
+            path_text = urllib.request.url2pathname(parsed.path)
+            if re.match(r"^/[A-Za-z]:", path_text):
+                path_text = path_text[1:]
+            candidates = [Path(path_text)]
+        else:
+            candidates = self._config_file_path_candidates(source)
+
+        for path in candidates:
+            try:
+                if path.exists() and path.is_file():
+                    return str(path.resolve())
+            except Exception:
+                continue
+        return ""
+
+    def _stored_warmup_image_asset(self) -> str:
+        assets = self._load_image_reply_assets()
+        item = assets.get(WARMUP_IMAGE_ASSET_KEY)
+        if isinstance(item, dict):
+            return self._string(item.get("file"))
+        return ""
+
+    def _save_warmup_image_asset(self, asset: str, *, activate: bool = False) -> None:
+        assets = self._load_image_reply_assets()
+        assets[WARMUP_IMAGE_ASSET_KEY] = {
+            "file": self._string(asset),
+            "updated_at": int(time.time()),
+        }
+        self._save_image_reply_assets(assets)
+        if activate:
+            self._write_file_config_updates(
+                {
+                    "forward_warmup_message_type": "图片",
+                    "forward_warmup_message_image": [{"file": self._string(asset)}],
+                }
+            )
+
+    def _delete_warmup_image_asset(self, *, restore_text: bool = False) -> bool:
+        assets = self._load_image_reply_assets()
+        existed = assets.pop(WARMUP_IMAGE_ASSET_KEY, None) is not None
+        if existed:
+            self._save_image_reply_assets(assets)
+        if restore_text:
+            self._write_file_config_updates(
+                {
+                    "forward_warmup_message_type": "文字",
+                    "forward_warmup_message_image": [],
+                }
+            )
+        return existed
+
+    def _write_file_config_updates(self, updates: dict[str, Any]) -> None:
+        try:
+            if self.config_file.exists():
+                data = json.loads(self.config_file.read_text(encoding="utf-8-sig"))
+                if not isinstance(data, dict):
+                    data = {}
+            else:
+                data = {}
+            data.update(updates)
+            self.config_file.parent.mkdir(parents=True, exist_ok=True)
+            self.config_file.write_text(
+                json.dumps(data, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            self._config_file_cache = data
+            try:
+                self._config_file_mtime = self.config_file.stat().st_mtime
+            except Exception:
+                self._config_file_mtime = None
+        except Exception as exc:
+            logger.warning("new_member_forwarder: failed to update config file %s: %s", self.config_file, exc)
+
     def _image_rule_reply_items(self, rule_kind: str) -> list[tuple[str, str]]:
         prefix = "two_image_reply" if rule_kind == "two" else "one_image_reply"
         available: dict[str, str] = {}
@@ -1535,7 +1759,22 @@ class NewMemberForwarderPlugin(Star):
                     return result
             return ""
         if isinstance(value, dict):
-            for key in ("path", "file", "url", "relative_path", "rel_path", "value", "name"):
+            for key in (
+                "path",
+                "file",
+                "file_path",
+                "filepath",
+                "local_path",
+                "abs_path",
+                "absolute_path",
+                "saved_path",
+                "url",
+                "relative_path",
+                "rel_path",
+                "value",
+                "name",
+                "filename",
+            ):
                 result = self._string(value.get(key))
                 if result:
                     return result
@@ -1568,7 +1807,18 @@ class NewMemberForwarderPlugin(Star):
         if get_astrbot_data_path:
             try:
                 data_path = Path(get_astrbot_data_path())
-                candidates.append(data_path / "plugin_data" / PLUGIN_NAME / raw_path)
+                candidates.extend(
+                    [
+                        data_path / raw_path,
+                        data_path / "plugins" / PLUGIN_NAME / raw_path,
+                        data_path / "plugin_data" / PLUGIN_NAME / raw_path,
+                        data_path / "plugin_data" / PLUGIN_NAME / "media" / raw_path,
+                        data_path / "plugin_data" / PLUGIN_NAME / "files" / raw_path,
+                        data_path / "plugin_data" / PLUGIN_NAME / "images" / raw_path,
+                        data_path / "temp" / raw_path,
+                        data_path / "temp" / "tool_images" / raw_path,
+                    ]
+                )
             except Exception:
                 pass
         return candidates
@@ -1985,8 +2235,21 @@ class NewMemberForwarderPlugin(Star):
             or text in self._cancel_words()
             or text in self._status_words()
             or text in self._clear_words()
+            or self._is_warmup_image_command_text(text)
             or self._is_image_reply_command_text(text)
         )
+
+    def _is_warmup_image_command_text(self, text: str) -> bool:
+        command = self._string(text).split(maxsplit=1)[0]
+        return command in {
+            "设置真人开路图片",
+            "添加真人开路图片",
+            "录入真人开路图片",
+            "设置开路图片",
+            "删除真人开路图片",
+            "移除真人开路图片",
+            "恢复真人开路文字",
+        }
 
     def _is_image_reply_command_text(self, text: str) -> bool:
         command = self._string(text).split(maxsplit=1)[0]
