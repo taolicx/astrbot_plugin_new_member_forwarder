@@ -28,7 +28,7 @@ WARMUP_IMAGE_ASSET_KEY = "warmup"
     PLUGIN_NAME,
     "Codex",
     "管理员私聊录制新人入群资料，新人进群时自动私聊转发文字、图片和聊天记录。",
-    "1.4.63",
+    "1.4.64",
 )
 class NewMemberForwarderPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig | None = None):
@@ -463,16 +463,13 @@ class NewMemberForwarderPlugin(Star):
             if not image_segments:
                 yield event.plain_result("这条没有识别到图片。请直接发送图片；发送“取消”可取消。")
                 return
-            asset = await self._extract_image_reply_asset(image_segments)
+            asset = await self._extract_warmup_image_asset(image_segments)
             if not asset:
-                yield event.plain_result("这条图片保存失败，请重新发送图片。")
+                yield event.plain_result("这条图片保存失败或格式不支持。真人开路图片请使用 PNG、JPG、JPEG、GIF 或 BMP。")
                 return
             self._warmup_image_recording_sessions.pop(sender_id, None)
             self._save_warmup_image_asset(asset, activate=True)
             yield event.plain_result("已设置真人开路图片，并已把真人开路第一条类型切换为“图片”。")
-            return
-
-        if not self._get_bool("private_image_reply_enabled", True):
             return
 
         if self._is_admin(sender_id) and sender_id in self._image_reply_recording_sessions:
@@ -492,6 +489,9 @@ class NewMemberForwarderPlugin(Star):
             self._image_reply_recording_sessions.pop(sender_id, None)
             self._save_image_reply_asset(rule_kind, asset)
             yield event.plain_result(f"已添加{self._image_rule_label(rule_kind)}回复图片。")
+            return
+
+        if not self._get_bool("private_image_reply_enabled", True):
             return
 
         if sender_id in self._recording_sessions:
@@ -1262,9 +1262,9 @@ class NewMemberForwarderPlugin(Star):
 
         image_segments = self._image_segments_from_event(event)
         if image_segments:
-            asset = await self._extract_image_reply_asset(image_segments)
+            asset = await self._extract_warmup_image_asset(image_segments)
             if not asset:
-                yield event.plain_result("这条图片保存失败，请重新发送图片。")
+                yield event.plain_result("这条图片保存失败或格式不支持。真人开路图片请使用 PNG、JPG、JPEG、GIF 或 BMP。")
                 return
             self._warmup_image_recording_sessions.pop(sender_id, None)
             self._save_warmup_image_asset(asset, activate=True)
@@ -1548,6 +1548,13 @@ class NewMemberForwarderPlugin(Star):
                 return image_file
         return ""
 
+    async def _extract_warmup_image_asset(self, image_segments: list[dict[str, Any]]) -> str:
+        asset = await self._extract_image_reply_asset(image_segments)
+        path = self._local_file_path_from_source(asset)
+        if not path:
+            return ""
+        return path if self._is_supported_warmup_image_path(path) else ""
+
     def _warmup_message_material(self) -> dict[str, str]:
         kind = self._warmup_message_kind()
         if kind == "image":
@@ -1571,14 +1578,17 @@ class NewMemberForwarderPlugin(Star):
 
     def _warmup_image_local_path(self) -> str:
         sources = [
-            self._stored_warmup_image_asset(),
             self._first_config_file_value(self._get("forward_warmup_message_image", [])),
+            self._stored_warmup_image_asset(),
         ]
         for source in sources:
             path = self._local_file_path_from_source(source)
-            if path:
+            if path and self._is_supported_warmup_image_path(path):
                 return path
         return ""
+
+    def _is_supported_warmup_image_path(self, path: str) -> bool:
+        return Path(self._string(path)).suffix.lower() in {".png", ".jpg", ".jpeg", ".gif", ".bmp"}
 
     def _local_file_path_from_source(self, source: str) -> str:
         source = self._string(source)
