@@ -280,7 +280,7 @@ function Set-ClipboardImageSafe([string]$Path) {
     try {
       $loaded = [System.Drawing.Image]::FromFile($resolved.Path)
       $bitmap = New-Object System.Drawing.Bitmap $loaded
-      [System.Windows.Forms.Clipboard]::SetImage($bitmap)
+      [System.Windows.Forms.Clipboard]::SetDataObject($bitmap, $true, 10, 120)
       return $true
     } catch {
       $lastError = $_.Exception.Message
@@ -792,7 +792,7 @@ function Open-SearchResultProfile($MainFrame, [int]$BaseY) {
   foreach ($pt in $points) {
     Write-TraceStage ("click-search-result " + $pt.Label + " x=" + $pt.X + " y=" + $pt.Y)
     Click-At ([int]$pt.X) ([int]$pt.Y)
-    $profile = Wait-ForProfileQuick 650
+    $profile = Wait-ForProfileQuick 1650
     if ($profile) { return $profile }
   }
 
@@ -800,7 +800,7 @@ function Open-SearchResultProfile($MainFrame, [int]$BaseY) {
     $pt = $points[$idx]
     Write-TraceStage ("double-click-search-result " + $pt.Label + " x=" + $pt.X + " y=" + $pt.Y)
     DoubleClick-At ([int]$pt.X) ([int]$pt.Y)
-    $profile = Wait-ForProfileQuick 900
+    $profile = Wait-ForProfileQuick 1900
     if ($profile) { return $profile }
   }
 
@@ -810,7 +810,7 @@ function Open-SearchResultProfile($MainFrame, [int]$BaseY) {
       $y = [int]($rowY + $dy)
       Write-TraceStage ("last-click-search-result x=" + $x + " y=" + $y)
       Click-At $x $y
-      $profile = Wait-ForProfileQuick 450
+      $profile = Wait-ForProfileQuick 1450
       if ($profile) { return $profile }
     }
   }
@@ -1081,10 +1081,10 @@ function Invoke-MemberSearchFromPage($MainFrame, [string]$Prefix, $Calibration =
     $script:CalibrationUsed = $true
     Write-TraceStage ("click-search-result-calibrated " + $Prefix + " x=" + $calibratedResult.X + " y=" + $calibratedResult.Y)
     Click-At $calibratedResult.X $calibratedResult.Y
-    $foundProfile = Wait-ForProfileQuick 1800
+    $foundProfile = Wait-ForProfileQuick 2800
     if (-not $foundProfile) {
       DoubleClick-At $calibratedResult.X $calibratedResult.Y
-      $foundProfile = Wait-ForProfileQuick 2200
+      $foundProfile = Wait-ForProfileQuick 3200
     }
   } else {
     $foundProfile = Open-SearchResultProfile $fresh $SearchResultBaseY
