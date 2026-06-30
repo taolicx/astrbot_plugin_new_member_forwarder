@@ -1,5 +1,5 @@
 param(
-  [ValidateSet("probe", "send")]
+  [ValidateSet("probe", "send", "calibrate")]
   [string]$Mode = "probe",
   [int]$GroupRow = 1,
   [int]$MemberRow = 3,
@@ -10,7 +10,8 @@ param(
   [string]$Message = "",
   [int]$WaitSeconds = 8,
   [string]$OutDir = "",
-  [string]$TraceFile = ""
+  [string]$TraceFile = "",
+  [string]$CalibrationFile = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -59,6 +60,9 @@ public class NmfStable {
   [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
   [DllImport("user32.dll")] public static extern void mouse_event(uint flags, uint dx, uint dy, uint data, UIntPtr extra);
   [DllImport("user32.dll")] public static extern void keybd_event(byte vk, byte scan, uint flags, UIntPtr extra);
+  [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X; public int Y; }
+  [DllImport("user32.dll")] public static extern bool GetCursorPos(out POINT point);
+  [DllImport("user32.dll")] public static extern short GetAsyncKeyState(int vKey);
 }
 "@
 
@@ -682,36 +686,217 @@ function Open-SearchResultProfile($MainFrame, [int]$BaseY) {
   return $null
 }
 
-function Invoke-MemberSearchFromPage($MainFrame, [string]$Prefix) {
+function New-RelativePoint($Frame, [int]$X, [int]$Y, [string]$Anchor) {
+  [ordered]@{
+    anchor = $Anchor
+    x = $X
+    y = $Y
+    relativeX = [Math]::Round((($X - [double]$Frame.Left) / [double]$Frame.Width), 6)
+    relativeY = [Math]::Round((($Y - [double]$Frame.Top) / [double]$Frame.Height), 6)
+    frame = @{
+      left = $Frame.Left
+      top = $Frame.Top
+      width = $Frame.Width
+      height = $Frame.Height
+    }
+  }
+}
+
+function Read-Calibration([string]$Path) {
+  if (-not $Path) { return $null }
+  try {
+    if (-not (Test-Path -LiteralPath $Path)) { return $null }
+    $data = Get-Content -LiteralPath $Path -Raw -Encoding UTF8 | ConvertFrom-Json
+    if ($data -and $data.points) {
+      Write-TraceStage ("calibration-loaded " + $Path)
+      return $data
+    }
+  } catch {
+    Write-TraceStage ("calibration-load-failed " + $_.Exception.Message)
+  }
+  return $null
+}
+
+function Get-CalibratedPoint($Calibration, [string]$Name, $Frame) {
+  if (-not $Calibration -or -not $Calibration.points) { return $null }
+  $prop = $Calibration.points.PSObject.Properties[$Name]
+  if (-not $prop) { return $null }
+  $pt = $prop.Value
+  if ($null -eq $pt.relativeX -or $null -eq $pt.relativeY) { return $null }
+  [pscustomobject]@{
+    X = [int]([Math]::Round($Frame.Left + ([double]$Frame.Width * [double]$pt.relativeX)))
+    Y = [int]([Math]::Round($Frame.Top + ([double]$Frame.Height * [double]$pt.relativeY)))
+    Name = $Name
+    Anchor = $pt.anchor
+  }
+}
+
+function Wait-CalibratedCursorPoint($Frame, [string]$Name, [string]$Anchor, [string]$Title, [string]$Instruction, [int]$TimeoutSeconds) {
+  Write-TraceStage ("calibrate-wait " + $Name)
+  $form = New-Object System.Windows.Forms.Form
+  $form.Text = "NMF Calibration"
+  $form.TopMost = $true
+  $form.Width = 520
+  $form.Height = 180
+  $form.StartPosition = "Manual"
+  $form.Left = [int]($Frame.Left + 20)
+  $form.Top = [int]($Frame.Top + 30)
+  $label = New-Object System.Windows.Forms.Label
+  $label.Dock = "Fill"
+  $label.Font = New-Object System.Drawing.Font("Microsoft YaHei UI", 11)
+  $label.Padding = New-Object System.Windows.Forms.Padding(14)
+  $label.Text = ($Title + "`r`n`r`n" + $Instruction + "`r`n`r`nMove mouse to the target point, press F8 to record, or press ESC to cancel. This window can be dragged.")
+  $form.Controls.Add($label)
+  [void]$form.Show()
+  $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+  try {
+    while ((Get-Date) -lt $deadline) {
+      [System.Windows.Forms.Application]::DoEvents()
+      if (([NmfStable]::GetAsyncKeyState(0x1B) -band 0x8000) -ne 0) {
+        throw "calibration canceled by ESC"
+      }
+      if (([NmfStable]::GetAsyncKeyState(0x77) -band 0x8000) -ne 0) {
+        while (([NmfStable]::GetAsyncKeyState(0x77) -band 0x8000) -ne 0) {
+          Start-Sleep -Milliseconds 40
+          [System.Windows.Forms.Application]::DoEvents()
+        }
+        $cursor = New-Object NmfStable+POINT
+        [NmfStable]::GetCursorPos([ref]$cursor) | Out-Null
+        Write-TraceStage ("calibrate-captured " + $Name + " x=" + $cursor.X + " y=" + $cursor.Y)
+        return New-RelativePoint $Frame ([int]$cursor.X) ([int]$cursor.Y) $Anchor
+      }
+      Start-Sleep -Milliseconds 60
+    }
+  } finally {
+    try { $form.Close(); $form.Dispose() } catch {}
+  }
+  throw ("calibration timeout waiting for " + $Name)
+}
+
+function Invoke-Calibration {
+  if (-not $CalibrationFile) {
+    throw "CalibrationFile is required in calibrate mode"
+  }
+  Write-TraceStage "calibrate-start"
+  Close-ProfilePopups
+  $mainFrame = Get-MainQQWindow
+  $script:MainHandleValue = $mainFrame.HandleValue
+  Focus-Maximized $mainFrame.Handle
+  $mainFrame = Get-MainQQWindow
+  $script:MainHandleValue = $mainFrame.HandleValue
+  [void]$shots.Add((Save-Shot $mainFrame "calibrate-01-main-start.png"))
+
+  $points = [ordered]@{}
+  $points.pinnedGroup = Wait-CalibratedCursorPoint $mainFrame "pinnedGroup" "main" "1/5 pinned group row" "Put the mouse on the pinned target group row in the left conversation list. Do not click." 180
+  $points.memberSearchInput = Wait-CalibratedCursorPoint $mainFrame "memberSearchInput" "main" "2/5 member search box" "Put the mouse on the member search box or search icon in the right member panel. Do not click." 180
+
+  $memberSearch = Get-CalibratedPoint ([pscustomobject]@{ points = [pscustomobject]$points }) "memberSearchInput" $mainFrame
+  Click-At $memberSearch.X $memberSearch.Y
+  Press-CtrlA-Backspace
+  if ($TargetQQ) {
+    Write-TraceStage "calibrate-type-target-qq"
+    if (-not (Type-Digits $TargetQQ)) {
+      Paste-Text $TargetQQ
+    }
+    Start-Sleep -Seconds 1
+  }
+  [void]$shots.Add((Save-Shot $mainFrame "calibrate-02-after-search-input.png"))
+
+  $points.searchResultFirst = Wait-CalibratedCursorPoint $mainFrame "searchResultFirst" "main" "3/5 first search result" "Put the mouse on the avatar or name of the first search result in the right panel. Do not click." 180
+  $resultPoint = Get-CalibratedPoint ([pscustomobject]@{ points = [pscustomobject]$points }) "searchResultFirst" $mainFrame
+  Click-At $resultPoint.X $resultPoint.Y
+  $profileFrame = Try-WaitForProfile 8
+  if ($profileFrame) {
+    [void]$shots.Add((Save-Shot $profileFrame "calibrate-03-profile.png"))
+    $points.profileSendButton = Wait-CalibratedCursorPoint $profileFrame "profileSendButton" "profile" "4/5 profile send button" "Put the mouse on the send-message button in the profile card. Do not click." 180
+    $sendPoint = Get-CalibratedPoint ([pscustomobject]@{ points = [pscustomobject]$points }) "profileSendButton" $profileFrame
+    Click-At $sendPoint.X $sendPoint.Y
+  } else {
+    [System.Windows.Forms.MessageBox]::Show("Open any member profile card manually, then click OK here.", "NMF Calibration", "OK", "Information") | Out-Null
+    $profileFrame = Try-WaitForProfile 30
+    if (-not $profileFrame) {
+      throw "profile card was not detected during calibration"
+    }
+    [void]$shots.Add((Save-Shot $profileFrame "calibrate-03-profile-manual.png"))
+    $points.profileSendButton = Wait-CalibratedCursorPoint $profileFrame "profileSendButton" "profile" "4/5 profile send button" "Put the mouse on the send-message button in the profile card. Do not click." 180
+    $sendPoint = Get-CalibratedPoint ([pscustomobject]@{ points = [pscustomobject]$points }) "profileSendButton" $profileFrame
+    Click-At $sendPoint.X $sendPoint.Y
+  }
+  Start-Sleep -Seconds 1
+  $mainFrame = Get-MainQQWindow
+  $script:MainHandleValue = $mainFrame.HandleValue
+  Focus-Maximized $mainFrame.Handle
+  [void]$shots.Add((Save-Shot $mainFrame "calibrate-04-private-chat.png"))
+  $points.privateChatInput = Wait-CalibratedCursorPoint $mainFrame "privateChatInput" "main" "5/5 private chat input" "Put the mouse inside the private chat input box at the bottom. Do not click." 180
+
+  $payload = [ordered]@{
+    version = 1
+    updatedAt = (Get-Date).ToString("o")
+    targetQQ = $TargetQQ
+    main = @{
+      left = $mainFrame.Left
+      top = $mainFrame.Top
+      width = $mainFrame.Width
+      height = $mainFrame.Height
+    }
+    points = $points
+  }
+  $parent = Split-Path -Parent $CalibrationFile
+  if ($parent) {
+    New-Item -ItemType Directory -Force -Path $parent | Out-Null
+  }
+  ($payload | ConvertTo-Json -Depth 8) | Set-Content -LiteralPath $CalibrationFile -Encoding UTF8
+  Write-TraceStage ("calibrate-saved " + $CalibrationFile)
+  $result = [ordered]@{
+    mode = "calibrate"
+    ok = $true
+    sent = $false
+    calibrationFile = $CalibrationFile
+    points = $points
+    shots = @($shots)
+    outDir = $OutDir
+  }
+  ($result | ConvertTo-Json -Depth 8) | Set-Content -Path (Join-Path $OutDir "result.json") -Encoding UTF8
+  $result | ConvertTo-Json -Depth 8
+}
+
+function Invoke-MemberSearchFromPage($MainFrame, [string]$Prefix, $Calibration = $null) {
   $mainLeft = [int]$MainFrame.Left
   $mainTop = [int]$MainFrame.Top
   $mainWidth = [int]$MainFrame.Width
   $searchRight = $mainLeft + $mainWidth
   $panelShot = Save-Shot $MainFrame ($Prefix + "-member-panel-before-search.png")
   [void]$shots.Add($panelShot)
-  $memberSearchY = Get-MemberSearchY $MainFrame $panelShot
-  if ($memberSearchY -gt 0) {
-    $candidateSearchYs = @($memberSearchY, ($memberSearchY + 8), ($memberSearchY - 8))
-    $primarySearchY = $memberSearchY
+  $calibratedSearch = Get-CalibratedPoint $Calibration "memberSearchInput" $MainFrame
+  if ($calibratedSearch) {
+    $script:CalibrationUsed = $true
+    Write-TraceStage ("click-member-search-calibrated " + $Prefix + " x=" + $calibratedSearch.X + " y=" + $calibratedSearch.Y)
+    Click-At $calibratedSearch.X $calibratedSearch.Y
   } else {
-    $candidateSearchYs = @(($mainTop + 258), ($mainTop + 270), ($mainTop + 246), ($mainTop + 282))
-    $primarySearchY = $mainTop + 258
-  }
-  foreach ($rawSearchIconY in $candidateSearchYs) {
-    $searchIconY = [int]([Math]::Max($mainTop + 230, [Math]::Min($mainTop + 330, [int]$rawSearchIconY)))
-    foreach ($searchIconX in @(($searchRight - 31), ($searchRight - 48))) {
-      Write-TraceStage ("click-member-search " + $Prefix + " x=" + $searchIconX + " y=" + $searchIconY)
-      Click-AtFast $searchIconX $searchIconY
+    $memberSearchY = Get-MemberSearchY $MainFrame $panelShot
+    if ($memberSearchY -gt 0) {
+      $candidateSearchYs = @($memberSearchY, ($memberSearchY + 8), ($memberSearchY - 8))
+      $primarySearchY = $memberSearchY
+    } else {
+      $candidateSearchYs = @(($mainTop + 258), ($mainTop + 270), ($mainTop + 246), ($mainTop + 282))
+      $primarySearchY = $mainTop + 258
     }
+    foreach ($rawSearchIconY in $candidateSearchYs) {
+      $searchIconY = [int]([Math]::Max($mainTop + 230, [Math]::Min($mainTop + 330, [int]$rawSearchIconY)))
+      foreach ($searchIconX in @(($searchRight - 31), ($searchRight - 48))) {
+        Write-TraceStage ("click-member-search " + $Prefix + " x=" + $searchIconX + " y=" + $searchIconY)
+        Click-AtFast $searchIconX $searchIconY
+      }
+      $searchInputX = [int]($searchRight - 145)
+      Write-TraceStage ("focus-member-search-input " + $Prefix + " x=" + $searchInputX + " y=" + $searchIconY)
+      Click-AtFast $searchInputX $searchIconY
+    }
+    Start-Sleep -Milliseconds 400
+    $primarySearchY = [int]([Math]::Max($mainTop + 230, [Math]::Min($mainTop + 330, [int]$primarySearchY)))
     $searchInputX = [int]($searchRight - 145)
-    Write-TraceStage ("focus-member-search-input " + $Prefix + " x=" + $searchInputX + " y=" + $searchIconY)
-    Click-AtFast $searchInputX $searchIconY
+    Write-TraceStage ("focus-member-search-input-final " + $Prefix + " x=" + $searchInputX + " y=" + $primarySearchY)
+    Click-At $searchInputX $primarySearchY
   }
-  Start-Sleep -Milliseconds 400
-  $primarySearchY = [int]([Math]::Max($mainTop + 230, [Math]::Min($mainTop + 330, [int]$primarySearchY)))
-  $searchInputX = [int]($searchRight - 145)
-  Write-TraceStage ("focus-member-search-input-final " + $Prefix + " x=" + $searchInputX + " y=" + $primarySearchY)
-  Click-At $searchInputX $primarySearchY
   Write-TraceStage ("type-target-qq " + $Prefix)
   Press-CtrlA-Backspace
   if (-not (Type-Digits $TargetQQ)) {
@@ -725,7 +910,19 @@ function Invoke-MemberSearchFromPage($MainFrame, [string]$Prefix) {
   $script:MainHandleValue = $fresh.HandleValue
   [void]$shots.Add((Save-Shot $fresh ($Prefix + "-member-search-result.png")))
   Write-TraceStage ("open-search-result-profile " + $Prefix)
-  $foundProfile = Open-SearchResultProfile $fresh $SearchResultBaseY
+  $calibratedResult = Get-CalibratedPoint $Calibration "searchResultFirst" $fresh
+  if ($calibratedResult) {
+    $script:CalibrationUsed = $true
+    Write-TraceStage ("click-search-result-calibrated " + $Prefix + " x=" + $calibratedResult.X + " y=" + $calibratedResult.Y)
+    Click-At $calibratedResult.X $calibratedResult.Y
+    $foundProfile = Wait-ForProfileQuick 900
+    if (-not $foundProfile) {
+      DoubleClick-At $calibratedResult.X $calibratedResult.Y
+      $foundProfile = Wait-ForProfileQuick 1200
+    }
+  } else {
+    $foundProfile = Open-SearchResultProfile $fresh $SearchResultBaseY
+  }
   if (-not $foundProfile) {
     [void]$shots.Add((Save-Shot $fresh ($Prefix + "-after-result-clicks.png")))
   }
@@ -734,6 +931,14 @@ function Invoke-MemberSearchFromPage($MainFrame, [string]$Prefix) {
 
 $shots = New-Object System.Collections.ArrayList
 $steps = New-Object System.Collections.ArrayList
+
+if ($Mode -eq "calibrate") {
+  Invoke-Calibration
+  return
+}
+
+$script:Calibration = Read-Calibration $CalibrationFile
+$script:CalibrationUsed = $false
 
 Write-TraceStage "close-profile-popups"
 Close-ProfilePopups
@@ -757,7 +962,7 @@ $usedMemberSearch = $false
 if ($TargetQQ) {
   $usedMemberSearch = $true
   Write-TraceStage "try-current-member-search-before-click-group"
-  $profile = Invoke-MemberSearchFromPage $main "02-current"
+  $profile = Invoke-MemberSearchFromPage $main "02-current" $script:Calibration
   if ($profile) {
     Write-TraceStage "current-member-search-profile-opened"
     [void]$steps.Add("current-member-search-ok")
@@ -770,8 +975,15 @@ if ($TargetQQ) {
     $script:MainHandleValue = $main.HandleValue
     Focus-Maximized $main.Handle
 
-    $groupX = $main.Left + [int]([Math]::Min(230, [Math]::Max(140, $main.Width * 0.07)))
-    $groupY = $main.Top + $GroupBaseY + (($GroupRow - 1) * 95)
+    $calibratedGroup = Get-CalibratedPoint $script:Calibration "pinnedGroup" $main
+    if ($calibratedGroup) {
+      $script:CalibrationUsed = $true
+      $groupX = $calibratedGroup.X
+      $groupY = $calibratedGroup.Y
+    } else {
+      $groupX = $main.Left + [int]([Math]::Min(230, [Math]::Max(140, $main.Width * 0.07)))
+      $groupY = $main.Top + $GroupBaseY + (($GroupRow - 1) * 95)
+    }
     Write-TraceStage ("click-pinned-group-after-current-search-failed x=" + $groupX + " y=" + $groupY)
     Click-At $groupX $groupY
     Start-Sleep -Milliseconds 1200
@@ -781,7 +993,7 @@ if ($TargetQQ) {
     $groupScore = Get-GroupPanelScore $main
     Write-TraceStage ("group-panel-score-after-click=" + ($groupScore | ConvertTo-Json -Compress))
     [void]$steps.Add("group-open-attempted")
-    $profile = Invoke-MemberSearchFromPage $main "04-pinned"
+    $profile = Invoke-MemberSearchFromPage $main "04-pinned" $script:Calibration
   }
 } else {
   Write-TraceStage "check-group-panel-probe"
@@ -816,8 +1028,15 @@ Write-TraceStage "ocr-profile"
 $profileOcr = Assert-ProfileQQ $profileShot $TargetQQ
 [void]$steps.Add("profile-ok")
 
-$sendX = $profile.Left + [int]($profile.Width * 0.73)
-$sendY = $profile.Top + $profile.Height - 62
+$calibratedSend = Get-CalibratedPoint $script:Calibration "profileSendButton" $profile
+if ($calibratedSend) {
+  $script:CalibrationUsed = $true
+  $sendX = $calibratedSend.X
+  $sendY = $calibratedSend.Y
+} else {
+  $sendX = $profile.Left + [int]($profile.Width * 0.73)
+  $sendY = $profile.Top + $profile.Height - 62
+}
 Write-TraceStage ("click-send-button x=" + $sendX + " y=" + $sendY)
 Click-At $sendX $sendY
 Start-Sleep -Seconds 1
@@ -833,8 +1052,15 @@ $privateScore = Assert-PrivateChat $main
 
 $sent = $false
 if ($Mode -eq "send") {
-  $privateEditorX = $main.Left + [int]($main.Width * 0.40)
-  $privateEditorY = $main.Top + $main.Height - 235
+  $calibratedPrivateInput = Get-CalibratedPoint $script:Calibration "privateChatInput" $main
+  if ($calibratedPrivateInput) {
+    $script:CalibrationUsed = $true
+    $privateEditorX = $calibratedPrivateInput.X
+    $privateEditorY = $calibratedPrivateInput.Y
+  } else {
+    $privateEditorX = $main.Left + [int]($main.Width * 0.40)
+    $privateEditorY = $main.Top + $main.Height - 235
+  }
   Write-TraceStage ("click-private-editor x=" + $privateEditorX + " y=" + $privateEditorY)
   Click-At $privateEditorX $privateEditorY
   Press-CtrlA-Backspace
@@ -860,6 +1086,8 @@ $result = [ordered]@{
   memberBaseY = $MemberBaseY
   searchResultBaseY = $SearchResultBaseY
   usedMemberSearch = $usedMemberSearch
+  calibrationFile = $CalibrationFile
+  calibrationUsed = $script:CalibrationUsed
   profileOcr = $profileOcr
   main = @{
     handle = $main.HandleValue

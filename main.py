@@ -30,7 +30,7 @@ class TempSessionNotReadyError(RuntimeError):
     PLUGIN_NAME,
     "Codex",
     "管理员私聊录制新人入群资料，新人进群时自动私聊转发文字、图片和聊天记录。",
-    "1.4.55",
+    "1.4.56",
 )
 class NewMemberForwarderPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig | None = None):
@@ -56,6 +56,7 @@ class NewMemberForwarderPlugin(Star):
         self.delivery_history_file = self.data_dir / "delivery_history.json"
         self.pending_file = self.data_dir / "pending_deliveries.json"
         self.warmup_source_file = self.data_dir / "warmup_source.json"
+        self.human_calibration_file = self.data_dir / "qq_human_calibration.json"
         self.config_file = self._resolve_config_file()
         self._config_file_cache: dict[str, Any] = {}
         self._config_file_mtime: float | None = None
@@ -364,6 +365,44 @@ class NewMemberForwarderPlugin(Star):
             reason = self._string(result.get("reason")) or "unknown"
             stage = self._string(result.get("stage")) or "-"
             yield event.plain_result(f"真人开路未成功执行：stage={stage}，reason={reason}")
+
+    @filter.platform_adapter_type(filter.PlatformAdapterType.AIOCQHTTP)
+    @filter.command("新人欢迎校准", alias={"新人欢迎QQ校准", "新人欢迎坐标校准"})
+    async def calibrate_human_group_warmup(self, event: AstrMessageEvent, target_qq: str = ""):
+        if not self._is_admin(self._string(event.get_sender_id())):
+            return
+
+        user_id = self._string(target_qq)
+        if not user_id.isdigit():
+            yield event.plain_result(
+                "用法：/新人欢迎校准 QQ号\n"
+                "先把 QQ 打开到目标群页面，然后按屏幕提示把鼠标移到指定位置并按 F8。"
+            )
+            return
+
+        yield event.plain_result(
+            "开始 QQ 坐标校准。\n"
+            "请看电脑桌面的校准提示窗：把鼠标放到目标位置后按 F8，按 ESC 可取消。"
+        )
+        timeout = max(60.0, self._get_float("qq_human_group_warmup_calibration_timeout_seconds", 300.0))
+        try:
+            result = await asyncio.to_thread(self._run_qq_human_group_warmup_calibration_script, user_id, timeout)
+        except Exception as exc:
+            logger.exception("new_member_forwarder: human warmup calibration failed: %s", exc)
+            yield event.plain_result(f"校准失败：{self._short_error(exc, 220)}")
+            return
+
+        if result.get("ok"):
+            yield event.plain_result(
+                "校准完成。\n"
+                f"文件：{self.human_calibration_file}\n"
+                "之后真人开路会优先使用校准坐标。"
+            )
+            return
+        yield event.plain_result(
+            f"校准未完成：stage={self._string(result.get('stage')) or '-'}，"
+            f"reason={self._string(result.get('reason')) or 'unknown'}"
+        )
 
     @filter.platform_adapter_type(filter.PlatformAdapterType.AIOCQHTTP)
     @filter.command("添加一图回复图片", alias={"设置一图回复图片", "录入一图回复图片"})
@@ -1479,6 +1518,8 @@ class NewMemberForwarderPlugin(Star):
             str(out_dir),
             "-TraceFile",
             str(trace_path),
+            "-CalibrationFile",
+            str(self.human_calibration_file),
         ]
         try:
             completed = subprocess.run(
@@ -1523,6 +1564,98 @@ class NewMemberForwarderPlugin(Star):
                 "steps": data.get("steps"),
                 "shots": data.get("shots"),
                 "profileOcr": data.get("profileOcr"),
+                "returncode": completed.returncode,
+            }
+
+        return {
+            "ok": False,
+            "stage": "powershell",
+            "reason": self._short_error(
+                RuntimeError(stderr or stdout or f"powershell exited with {completed.returncode}"),
+                300,
+            ),
+            "outDir": str(out_dir),
+            "script": str(script_path),
+            "returncode": completed.returncode,
+        }
+
+    def _run_qq_human_group_warmup_calibration_script(self, user_id: str, timeout: float) -> dict[str, Any]:
+        script_path = self._verified_qq_human_stable_script_path()
+        if not script_path:
+            return {"ok": False, "stage": "script", "reason": "qq_human_send_stable.ps1 not found"}
+
+        runtime_dir = self.data_dir / "runtime_scripts"
+        trace_path = runtime_dir / f"human_calibration_{user_id}_{int(time.time() * 1000)}.trace.log"
+        out_dir = self._qq_human_debug_base() / f"calibration-{time.strftime('%Y%m%d-%H%M%S')}-{user_id}"
+        try:
+            runtime_dir.mkdir(parents=True, exist_ok=True)
+            out_dir.mkdir(parents=True, exist_ok=True)
+            trace_path.write_text(f"calibration_script={script_path}\n", encoding="utf-8")
+        except Exception:
+            pass
+
+        command = [
+            "powershell.exe",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-STA",
+            "-File",
+            str(script_path),
+            "-Mode",
+            "calibrate",
+            "-TargetQQ",
+            user_id,
+            "-WaitSeconds",
+            str(max(3, int(self._get_float("qq_human_group_warmup_wait_seconds", 20.0)))),
+            "-OutDir",
+            str(out_dir),
+            "-TraceFile",
+            str(trace_path),
+            "-CalibrationFile",
+            str(self.human_calibration_file),
+        ]
+        try:
+            completed = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=timeout,
+            )
+        except subprocess.TimeoutExpired:
+            stage = self._read_runtime_trace_tail(trace_path) or "calibration_timeout"
+            return {
+                "ok": False,
+                "stage": stage,
+                "reason": f"powershell_timeout_after_{timeout:.1f}s",
+                "outDir": str(out_dir),
+                "script": str(script_path),
+            }
+
+        stdout = completed.stdout or ""
+        stderr = completed.stderr or ""
+        result_path = out_dir / "result.json"
+        data: dict[str, Any] | None = None
+        if result_path.exists():
+            try:
+                parsed = json.loads(result_path.read_text(encoding="utf-8-sig"))
+                if isinstance(parsed, dict):
+                    data = parsed
+            except Exception:
+                data = None
+        if data is None:
+            data = self._json_from_powershell_stdout(stdout)
+        if data is not None:
+            ok = bool(data.get("ok"))
+            return {
+                "ok": ok,
+                "stage": "calibrated" if ok else self._string(data.get("stage") or data.get("mode") or "not_calibrated"),
+                "reason": "calibrated" if ok else self._short_error(RuntimeError(stderr or stdout or "not calibrated"), 300),
+                "outDir": self._string(data.get("outDir")) or str(out_dir),
+                "script": str(script_path),
+                "calibrationFile": self._string(data.get("calibrationFile")) or str(self.human_calibration_file),
                 "returncode": completed.returncode,
             }
 
