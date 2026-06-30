@@ -30,7 +30,7 @@ class TempSessionNotReadyError(RuntimeError):
     PLUGIN_NAME,
     "Codex",
     "管理员私聊录制新人入群资料，新人进群时自动私聊转发文字、图片和聊天记录。",
-    "1.4.58",
+    "1.4.59",
 )
 class NewMemberForwarderPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig | None = None):
@@ -1219,7 +1219,7 @@ class NewMemberForwarderPlugin(Star):
                 return False
         self._qq_human_group_warmup_last_at[key] = now
 
-        timeout = max(8.0, self._get_float("qq_human_group_warmup_timeout_seconds", 45.0))
+        timeout = max(65.0, self._get_float("qq_human_group_warmup_timeout_seconds", 65.0))
         try:
             result = await asyncio.to_thread(
                 self._run_qq_human_group_warmup_script,

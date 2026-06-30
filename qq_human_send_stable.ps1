@@ -758,6 +758,20 @@ function Get-CalibratedPoint($Calibration, [string]$Name, $Frame) {
   }
 }
 
+function Get-StoredCalibrationPoint($Calibration, [string]$Name) {
+  if (-not $Calibration -or -not $Calibration.points) { return $null }
+  $prop = $Calibration.points.PSObject.Properties[$Name]
+  if (-not $prop) { return $null }
+  $pt = $prop.Value
+  if ($null -eq $pt.x -or $null -eq $pt.y) { return $null }
+  [pscustomobject]@{
+    X = [int]$pt.x
+    Y = [int]$pt.y
+    Name = $Name
+    Anchor = $pt.anchor
+  }
+}
+
 function Wait-CalibratedCursorPoint($Frame, [string]$Name, [string]$Anchor, [string]$Title, [string]$Instruction, [int]$TimeoutSeconds) {
   Write-TraceStage ("calibrate-wait " + $Name)
   $form = New-Object System.Windows.Forms.Form
@@ -1053,27 +1067,51 @@ if (-not $profile) {
   Write-TraceStage "wait-profile"
   $profileWaitSeconds = $WaitSeconds
   if ($TargetQQ) {
-    $profileWaitSeconds = [Math]::Min([Math]::Max($WaitSeconds, 12), 15)
+    if (Get-StoredCalibrationPoint $script:Calibration "profileSendButton") {
+      $profileWaitSeconds = 4
+    } else {
+      $profileWaitSeconds = [Math]::Min([Math]::Max($WaitSeconds, 12), 15)
+    }
   }
-  $profile = Wait-ForProfile $profileWaitSeconds
+  Write-TraceStage ("wait-profile-seconds=" + $profileWaitSeconds)
+  $profile = Try-WaitForProfile $profileWaitSeconds
 }
-Write-TraceStage ("profile-window=" + ($profile | ConvertTo-Json -Compress))
-$profileShot = Save-Shot $profile "04-profile-card.png"
-[void]$shots.Add($profileShot)
-Write-TraceStage "ocr-profile"
-$profileOcr = Assert-ProfileQQ $profileShot $TargetQQ
-[void]$steps.Add("profile-ok")
 
-$calibratedSend = Get-CalibratedPoint $script:Calibration "profileSendButton" $profile
-if ($calibratedSend) {
-  $script:CalibrationUsed = $true
-  $sendX = $calibratedSend.X
-  $sendY = $calibratedSend.Y
+$profileOcr = ""
+if ($profile) {
+  Write-TraceStage ("profile-window=" + ($profile | ConvertTo-Json -Compress))
+  $profileShot = Save-Shot $profile "04-profile-card.png"
+  [void]$shots.Add($profileShot)
+  Write-TraceStage "ocr-profile"
+  $profileOcr = Assert-ProfileQQ $profileShot $TargetQQ
+  [void]$steps.Add("profile-ok")
+
+  $calibratedSend = Get-CalibratedPoint $script:Calibration "profileSendButton" $profile
+  if ($calibratedSend) {
+    $script:CalibrationUsed = $true
+    $sendX = $calibratedSend.X
+    $sendY = $calibratedSend.Y
+  } else {
+    $sendX = $profile.Left + [int]($profile.Width * 0.73)
+    $sendY = $profile.Top + $profile.Height - 62
+  }
+  Write-TraceStage ("click-send-button x=" + $sendX + " y=" + $sendY)
 } else {
-  $sendX = $profile.Left + [int]($profile.Width * 0.73)
-  $sendY = $profile.Top + $profile.Height - 62
+  Write-TraceStage "profile-not-detected-try-calibrated-send-button"
+  try {
+    $main = Get-MainQQWindow
+    $script:MainHandleValue = $main.HandleValue
+    [void]$shots.Add((Save-Shot $main "04-profile-not-detected-before-calibrated-send.png"))
+  } catch {}
+  $storedSend = Get-StoredCalibrationPoint $script:Calibration "profileSendButton"
+  if (-not $storedSend) {
+    throw "profile card was not detected and no calibrated send button is available"
+  }
+  $script:CalibrationUsed = $true
+  $sendX = $storedSend.X
+  $sendY = $storedSend.Y
+  Write-TraceStage ("click-send-button-stored-calibration x=" + $sendX + " y=" + $sendY)
 }
-Write-TraceStage ("click-send-button x=" + $sendX + " y=" + $sendY)
 Click-At $sendX $sendY
 Start-Sleep -Seconds 1
 $main = Get-MainQQWindow
@@ -1111,6 +1149,17 @@ if ($Mode -eq "send") {
   Write-TraceStage "sent"
 }
 
+$profileResult = $null
+if ($profile) {
+  $profileResult = @{
+    handle = $profile.HandleValue
+    left = $profile.Left
+    top = $profile.Top
+    width = $profile.Width
+    height = $profile.Height
+  }
+}
+
 $result = [ordered]@{
   mode = $Mode
   sent = $sent
@@ -1132,13 +1181,7 @@ $result = [ordered]@{
     width = $main.Width
     height = $main.Height
   }
-  profile = @{
-    handle = $profile.HandleValue
-    left = $profile.Left
-    top = $profile.Top
-    width = $profile.Width
-    height = $profile.Height
-  }
+  profile = $profileResult
   groupPanelScore = $groupScore
   privateGuardScore = $privateScore
   steps = @($steps)

@@ -81,7 +81,7 @@
     "type": "float",
     "description": "真人开路总超时秒数",
     "hint": "真人开路辅助脚本最长运行时间，超过后本次新人欢迎停止。",
-    "default": 45.0
+    "default": 65.0
   },
   "qq_human_group_warmup_post_send_delay_seconds": {
     "type": "float",
