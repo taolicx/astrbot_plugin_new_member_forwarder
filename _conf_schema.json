@@ -50,7 +50,7 @@
   "qq_human_group_warmup_enabled": {
     "type": "bool",
     "description": "启用 QQ 真人开路",
-    "hint": "新人进群后，机器人会操控本机 QQ：打开置顶群、搜索新人 QQ、点发消息并发送第一条开路文字或图片。",
+    "hint": "新人进群后，机器人会操控本机 QQ：打开置顶群、搜索新人 QQ、右键第一条搜索结果选择发送消息，并发送第一条开路文字或图片。",
     "default": true
   },
   "forward_warmup_message_type": {
@@ -99,7 +99,7 @@
   "qq_human_group_warmup_wait_seconds": {
     "type": "float",
     "description": "单步等待秒数",
-    "hint": "等待 QQ 窗口、成员搜索结果、资料卡和私聊窗口出现的时间。",
+    "hint": "等待 QQ 窗口、成员搜索结果、右键发送消息和私聊窗口出现的时间。",
     "default": 20.0
   },
   "qq_human_group_warmup_timeout_seconds": {
