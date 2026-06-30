@@ -65,6 +65,7 @@ public class NmfStable {
 [NmfStable]::SetProcessDPIAware() | Out-Null
 
 $script:ProfileTitle = -join ([char[]](0x8d44, 0x6599, 0x5361))
+$script:NoticeTitle = -join ([char[]](0x7fa4, 0x516c, 0x544a))
 if (-not $Message) {
   $Message = -join ([char[]](0x6b22, 0x8fce, 0x8fdb, 0x7fa4))
 }
@@ -465,8 +466,9 @@ function Assert-PrivateChat($Frame) {
 
 function Close-ProfilePopups {
   foreach ($popup in @(Find-QQWindows | Where-Object {
+    $title = $_.Title + ""
     $_.HandleValue -ne $script:MainHandleValue -and
-    ($_.Title -eq $script:ProfileTitle -or ($_.Width -ge 300 -and $_.Width -le 900 -and $_.Height -ge 300 -and $_.Height -le 1000))
+    ($title -like "*$script:NoticeTitle*" -or $_.Title -eq $script:ProfileTitle -or ($_.Width -ge 300 -and $_.Width -le 900 -and $_.Height -ge 300 -and $_.Height -le 1000))
   })) {
     [NmfStable]::PostMessage($popup.Handle, 0x0010, [UIntPtr]::Zero, [UIntPtr]::Zero) | Out-Null
   }
@@ -475,8 +477,10 @@ function Close-ProfilePopups {
 
 function Get-ProfileCandidate {
   $windows = @(Find-QQWindows | Where-Object {
+    $title = $_.Title + ""
     $_.Visible -and
     $_.HandleValue -ne $script:MainHandleValue -and
+    $title -notlike "*$script:NoticeTitle*" -and
     $_.Left -ge 0 -and
     $_.Top -ge 0 -and
     $_.Width -gt 300 -and
@@ -511,27 +515,52 @@ function Try-WaitForProfile([int]$Seconds) {
   }
 }
 
-function Open-SearchResultProfile($MainFrame, [int]$BaseY) {
-  $xOffsets = @(-255, -225, -195, -165)
-  $yOffsets = @(-40, -20, 0, 22, 45)
-  foreach ($dy in $yOffsets) {
-    $rowY = $MainFrame.Top + $BaseY + $dy
-    foreach ($dx in $xOffsets) {
-      $x = $MainFrame.Left + $MainFrame.Width + $dx
-      Write-TraceStage ("click-search-result x=" + $x + " y=" + $rowY)
-      Click-At $x $rowY
-      $profile = Try-WaitForProfile 1
-      if ($profile) { return $profile }
+function Wait-ForProfileQuick([int]$Milliseconds) {
+  $deadline = (Get-Date).AddMilliseconds([Math]::Max(100, $Milliseconds))
+  while ((Get-Date) -lt $deadline) {
+    $profile = Get-ProfileCandidate
+    if ($profile) {
+      return $profile
     }
+    Start-Sleep -Milliseconds 120
+  }
+  return $null
+}
+
+function Open-SearchResultProfile($MainFrame, [int]$BaseY) {
+  $right = [int]($MainFrame.Left + $MainFrame.Width)
+  $top = [int]$MainFrame.Top
+  $rowY = [int]($top + $BaseY)
+  $points = New-Object System.Collections.ArrayList
+  [void]$points.Add([pscustomobject]@{ X = $right - 238; Y = $rowY; Label = "first-avatar" })
+  [void]$points.Add([pscustomobject]@{ X = $right - 210; Y = $rowY; Label = "first-name" })
+  [void]$points.Add([pscustomobject]@{ X = $right - 260; Y = $rowY; Label = "first-left" })
+  [void]$points.Add([pscustomobject]@{ X = $right - 238; Y = $rowY - 18; Label = "first-avatar-high" })
+  [void]$points.Add([pscustomobject]@{ X = $right - 210; Y = $rowY - 18; Label = "first-name-high" })
+  [void]$points.Add([pscustomobject]@{ X = $right - 238; Y = $rowY + 18; Label = "first-avatar-low" })
+
+  foreach ($pt in $points) {
+    Write-TraceStage ("click-search-result " + $pt.Label + " x=" + $pt.X + " y=" + $pt.Y)
+    Click-At ([int]$pt.X) ([int]$pt.Y)
+    $profile = Wait-ForProfileQuick 650
+    if ($profile) { return $profile }
   }
 
-  foreach ($dy in @(0, -25, 25)) {
-    $rowY = $MainFrame.Top + $BaseY + $dy
-    foreach ($dx in @(-240, -185)) {
-      $x = $MainFrame.Left + $MainFrame.Width + $dx
-      Write-TraceStage ("double-click-search-result x=" + $x + " y=" + $rowY)
-      DoubleClick-At $x $rowY
-      $profile = Try-WaitForProfile 1
+  foreach ($idx in @(0, 1, 3)) {
+    $pt = $points[$idx]
+    Write-TraceStage ("double-click-search-result " + $pt.Label + " x=" + $pt.X + " y=" + $pt.Y)
+    DoubleClick-At ([int]$pt.X) ([int]$pt.Y)
+    $profile = Wait-ForProfileQuick 900
+    if ($profile) { return $profile }
+  }
+
+  foreach ($dy in @(-34, 0, 34)) {
+    foreach ($dx in @(-250, -205)) {
+      $x = [int]($right + $dx)
+      $y = [int]($rowY + $dy)
+      Write-TraceStage ("last-click-search-result x=" + $x + " y=" + $y)
+      Click-At $x $y
+      $profile = Wait-ForProfileQuick 450
       if ($profile) { return $profile }
     }
   }
@@ -604,7 +633,7 @@ if ($TargetQQ) {
   $mainTop = [int]$main.Top
   $mainWidth = [int]$main.Width
   $searchIconX = $mainLeft + $mainWidth - 31
-  foreach ($searchIconY in @(($mainTop + 246), ($mainTop + 258), ($mainTop + 264), ($mainTop + 276))) {
+  foreach ($searchIconY in @(($mainTop + 210), ($mainTop + 218), ($mainTop + 226), ($mainTop + 238), ($mainTop + 246), ($mainTop + 258), ($mainTop + 276))) {
     Write-TraceStage ("click-member-search x=" + $searchIconX + " y=" + $searchIconY)
     Click-At $searchIconX $searchIconY
     Start-Sleep -Milliseconds 180
@@ -615,6 +644,11 @@ if ($TargetQQ) {
   Write-TraceStage "paste-target-qq"
   Paste-Text $TargetQQ
   Start-Sleep -Seconds 1
+  Write-TraceStage "close-interfering-popups"
+  Close-ProfilePopups
+  Focus-Maximized $main.Handle
+  $main = Get-MainQQWindow
+  $script:MainHandleValue = $main.HandleValue
   [void]$shots.Add((Save-Shot $main "03-member-search-result.png"))
   Write-TraceStage "open-search-result-profile"
   $profile = Open-SearchResultProfile $main $SearchResultBaseY
@@ -629,7 +663,11 @@ if ($TargetQQ) {
 }
 if (-not $profile) {
   Write-TraceStage "wait-profile"
-  $profile = Wait-ForProfile $WaitSeconds
+  $profileWaitSeconds = $WaitSeconds
+  if ($TargetQQ) {
+    $profileWaitSeconds = [Math]::Min($WaitSeconds, 5)
+  }
+  $profile = Wait-ForProfile $profileWaitSeconds
 }
 Write-TraceStage ("profile-window=" + ($profile | ConvertTo-Json -Compress))
 $profileShot = Save-Shot $profile "04-profile-card.png"
