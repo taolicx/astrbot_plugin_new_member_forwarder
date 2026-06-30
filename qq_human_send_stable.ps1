@@ -1148,32 +1148,34 @@ function Invoke-Calibration {
   }
   [void]$shots.Add((Save-Shot $mainFrame "calibrate-02-after-search-input.png"))
 
-  $points.searchResultFirst = Wait-CalibratedCursorPoint $mainFrame "searchResultFirst" "main" "3/5 第一条搜索结果" "把鼠标放到右侧第一条搜索结果的头像或昵称上，不要点击，然后按 F8。" 180
-  $resultPoint = Get-CalibratedPoint ([pscustomobject]@{ points = [pscustomobject]$points }) "searchResultFirst" $mainFrame
-  Click-At $resultPoint.X $resultPoint.Y
-  $profileFrame = Try-WaitForProfile 8
-  if ($profileFrame) {
-    [void]$shots.Add((Save-Shot $profileFrame "calibrate-03-profile.png"))
-    $points.profileSendButton = Wait-CalibratedCursorPoint $profileFrame "profileSendButton" "profile" "4/5 资料卡发消息按钮" "把鼠标放到资料卡里的发消息按钮上，不要点击，然后按 F8。" 180
-    $sendPoint = Get-CalibratedPoint ([pscustomobject]@{ points = [pscustomobject]$points }) "profileSendButton" $profileFrame
-    Click-At $sendPoint.X $sendPoint.Y
-  } else {
-    [System.Windows.Forms.MessageBox]::Show("没有自动打开资料卡。请手动打开任意群成员资料卡，然后点这里的确定继续校准。", "新人欢迎校准", "OK", "Information") | Out-Null
-    $profileFrame = Try-WaitForProfile 30
-    if (-not $profileFrame) {
-      throw "profile card was not detected during calibration"
+  $points.searchResultFirst = Wait-CalibratedCursorPoint $mainFrame "searchResultFirst" "main" "3/4 第一条搜索结果" "把鼠标放到右侧第一条搜索结果的头像或昵称上，不要点击，然后按 F8。校准脚本会右键它并选择发送消息。" 180
+  $mainFrame = Get-MainQQWindow
+  $script:MainHandleValue = $mainFrame.HandleValue
+  $script:LastGroupLikeShot = Save-Shot $mainFrame "calibrate-03-search-result-before-context-menu.png"
+  [void]$shots.Add($script:LastGroupLikeShot)
+  $calibrationSnapshot = [pscustomobject]@{
+    main = [pscustomobject]@{
+      left = $mainFrame.Left
+      top = $mainFrame.Top
+      width = $mainFrame.Width
+      height = $mainFrame.Height
     }
-    [void]$shots.Add((Save-Shot $profileFrame "calibrate-03-profile-manual.png"))
-    $points.profileSendButton = Wait-CalibratedCursorPoint $profileFrame "profileSendButton" "profile" "4/5 资料卡发消息按钮" "把鼠标放到资料卡里的发消息按钮上，不要点击，然后按 F8。" 180
-    $sendPoint = Get-CalibratedPoint ([pscustomobject]@{ points = [pscustomobject]$points }) "profileSendButton" $profileFrame
-    Click-At $sendPoint.X $sendPoint.Y
+    points = [pscustomobject]$points
+  }
+  $privateOpened = Open-SearchResultPrivateChat $mainFrame $SearchResultBaseY $calibrationSnapshot "calibrate"
+  if (-not $privateOpened) {
+    [System.Windows.Forms.MessageBox]::Show("没有通过右键菜单自动进入私聊。请手动右键第一条搜索结果，选择发送消息，进入私聊窗口后点这里的确定继续校准。", "新人欢迎校准", "OK", "Information") | Out-Null
+    $privateOpened = Wait-ForPrivateChatQuick 30000 "calibrate-manual-private-chat"
+    if (-not $privateOpened) {
+      throw "private chat was not opened during calibration"
+    }
   }
   Start-Sleep -Seconds 1
   $mainFrame = Get-MainQQWindow
   $script:MainHandleValue = $mainFrame.HandleValue
   Focus-Maximized $mainFrame.Handle
   [void]$shots.Add((Save-Shot $mainFrame "calibrate-04-private-chat.png"))
-  $points.privateChatInput = Wait-CalibratedCursorPoint $mainFrame "privateChatInput" "main" "5/5 私聊输入框" "把鼠标放到底部私聊输入框里，不要点击，然后按 F8。" 180
+  $points.privateChatInput = Wait-CalibratedCursorPoint $mainFrame "privateChatInput" "main" "4/4 私聊输入框" "把鼠标放到底部私聊输入框里，不要点击，然后按 F8。" 180
 
   $payload = [ordered]@{
     version = 1
