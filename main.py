@@ -30,7 +30,7 @@ class TempSessionNotReadyError(RuntimeError):
     PLUGIN_NAME,
     "Codex",
     "管理员私聊录制新人入群资料，新人进群时自动私聊转发文字、图片和聊天记录。",
-    "1.4.42",
+    "1.4.43",
 )
 class NewMemberForwarderPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig | None = None):
@@ -290,6 +290,25 @@ class NewMemberForwarderPlugin(Star):
             self._test_delivery_running_until = time.time() + 5.0
 
         return f"已私聊 QQ {user_id} 执行一次测试发送。"
+
+    @filter.platform_adapter_type(filter.PlatformAdapterType.AIOCQHTTP)
+    @filter.command("新人欢迎重置发送次数", alias={"新人欢迎清除发送次数", "新人欢迎重置次数"})
+    async def reset_delivery_count(self, event: AstrMessageEvent, target_qq: str = "", source_group_id: str = ""):
+        if not self._is_admin(self._string(event.get_sender_id())):
+            return
+
+        user_id = self._string(target_qq)
+        group_id = self._string(source_group_id or event.get_group_id())
+        if not user_id.isdigit():
+            yield event.plain_result("用法：/新人欢迎重置发送次数 QQ号 [群号]")
+            return
+
+        removed = self._reset_delivery_history_for(group_id, user_id)
+        self._delivery_inflight.pop(self._delivery_history_key(group_id, user_id), None)
+        if removed:
+            yield event.plain_result(f"已重置 QQ {user_id} 的新人欢迎发送次数，可重新用进群事件测试。")
+        else:
+            yield event.plain_result(f"QQ {user_id} 当前没有发送次数记录。")
 
     @filter.platform_adapter_type(filter.PlatformAdapterType.AIOCQHTTP)
     @filter.command("新人欢迎开路测试")
@@ -3974,10 +3993,13 @@ Out-Result $false 'target_qq_window_or_send_button_not_found' 'wait'
         pending_count = self._delivery_inflight.get(key, 0)
         if sent_count + pending_count >= max_deliveries:
             logger.info(
-                "new_member_forwarder: skip delivery to %s in group %s because limit %s reached.",
+                "new_member_forwarder: skip delivery to %s in group %s because delivery limit %s reached; "
+                "use /新人欢迎重置发送次数 %s %s for repeated tests.",
                 user_id,
                 group_id,
                 max_deliveries,
+                user_id,
+                group_id,
             )
             return None
 
@@ -4284,6 +4306,29 @@ Out-Result $false 'target_qq_window_or_send_button_not_found' 'wait'
             json.dumps(payload, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
+
+    def _reset_delivery_history_for(self, group_id: str, user_id: str) -> int:
+        user_id = self._string(user_id)
+        group_id = self._string(group_id)
+        history = self._load_delivery_history()
+        recipients = history.get("recipients") if isinstance(history.get("recipients"), dict) else {}
+        if not user_id or not isinstance(recipients, dict):
+            return 0
+
+        keys = {user_id, self._delivery_history_key(group_id, user_id)}
+        for key in list(recipients.keys()):
+            if self._string(key).endswith(f":{user_id}"):
+                keys.add(key)
+
+        removed = 0
+        for key in keys:
+            if key in recipients:
+                recipients.pop(key, None)
+                removed += 1
+        if removed:
+            history["recipients"] = recipients
+            self._save_delivery_history(history)
+        return removed
 
     def _cleanup_delivery_history(self, payload: dict[str, Any]) -> bool:
         expire_days = self._get_float("delivery_history_expire_days", 0.0)
