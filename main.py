@@ -30,7 +30,7 @@ class TempSessionNotReadyError(RuntimeError):
     PLUGIN_NAME,
     "Codex",
     "管理员私聊录制新人入群资料，新人进群时自动私聊转发文字、图片和聊天记录。",
-    "1.4.28",
+    "1.4.29",
 )
 class NewMemberForwarderPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig | None = None):
@@ -1199,6 +1199,14 @@ class NewMemberForwarderPlugin(Star):
             return False
         member_name = self._member_display_name(member_info)
         group_name = await self._get_group_display_name(bot, group_id, self_id)
+        human_sent = await self._send_qq_human_group_warmup_message(
+            group_id,
+            user_id,
+            member_name,
+            group_name,
+        )
+        if human_sent:
+            return True
         llbot_activated = await self._activate_llbot_temp_context(bot, group_id, user_id)
         opened = await self._open_qq_profile_context(group_id, user_id)
         if llbot_activated or opened:
@@ -1208,15 +1216,6 @@ class NewMemberForwarderPlugin(Star):
                 member_name,
                 group_name,
             )
-            return True
-
-        human_sent = await self._send_qq_human_group_warmup_message(
-            group_id,
-            user_id,
-            member_name,
-            group_name,
-        )
-        if human_sent:
             return True
         return True
 
@@ -1498,6 +1497,10 @@ function Out-Result([bool]$ok, [string]$reason, [string]$stage) {
 function Is-True([string]$value) {
   $v = ($value + '').Trim().ToLowerInvariant()
   return @('1','true','yes','on') -contains $v
+}
+
+function Is-SingleQQMode {
+  return Is-True $env:NMF_SINGLE_QQ_MODE
 }
 
 function Write-Stage([string]$stage) {
@@ -1801,6 +1804,10 @@ function Try-OpenGroupFromQQSearch([string[]]$groupHints, [bool]$requireGroupHin
     Start-Sleep -Milliseconds 1300
     $verified = Find-GroupWindow $groupHints $requireGroupHint
     if ($verified -ne $null) { return $verified }
+    if (Is-SingleQQMode) {
+      Write-Stage 'group_search_single_qq_fallback'
+      return $win
+    }
     $visibleQQ = @(Get-QQWindows)
     if ($visibleQQ.Count -eq 1) {
       Write-Stage 'group_search_single_window_fallback'
@@ -1987,6 +1994,15 @@ while ((Get-Date) -lt $deadline -and $groupWin -eq $null) {
   if ($groupWin -eq $null) { Start-Sleep -Milliseconds 450 }
 }
 if ($groupWin -eq $null) {
+  if (Is-SingleQQMode) {
+    Write-Stage 'single_qq_group_window_fallback'
+    $fallbackWindows = @(Get-QQWindows)
+    if ($fallbackWindows.Count -ge 1) {
+      $groupWin = $fallbackWindows[0]
+    }
+  }
+}
+if ($groupWin -eq $null) {
   Out-Result $false 'group_window_not_found_after_protocol_and_search' 'group'
   exit 0
 }
@@ -2076,6 +2092,9 @@ Out-Result $false 'target_member_or_send_message_button_not_found' 'target'
                 else "0",
                 "NMF_GROUP_SEARCH": "1"
                 if self._get_bool("qq_human_group_warmup_group_search_enabled", True)
+                else "0",
+                "NMF_SINGLE_QQ_MODE": "1"
+                if self._get_bool("qq_human_group_warmup_single_qq_mode", False)
                 else "0",
                 "NMF_FORCE_OPEN_GROUP_PROTOCOL": "1"
                 if self._get_bool("qq_human_group_warmup_force_open_group_protocol_enabled", False)

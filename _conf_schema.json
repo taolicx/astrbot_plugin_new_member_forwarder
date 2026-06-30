@@ -109,6 +109,11 @@
     "description": "找不到来源群窗口时，尝试聚焦 QQ 并通过 QQ 搜索框查找来源群。",
     "default": true
   },
+  "qq_human_group_warmup_single_qq_mode": {
+    "type": "bool",
+    "description": "单 QQ 本机测试模式：电脑上只登录机器人 QQ 时可开启，群搜索后允许直接使用当前 QQ 窗口作为来源群窗口。",
+    "default": false
+  },
   "qq_human_group_warmup_open_group_protocol_enabled": {
     "type": "bool",
     "description": "旧版协议拉群开关，当前真人开路不再使用；保留该项只是兼容旧配置。",

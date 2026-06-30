@@ -96,6 +96,7 @@ AstrBot/data/plugins/astrbot_plugin_new_member_forwarder
 - `qq_human_group_warmup_require_group_hint` / `qq_human_group_warmup_require_target_hint`：是否强制校验来源群和新人线索，双 QQ 登录建议开启。
 - `qq_human_group_warmup_member_search_enabled`：找不到新人时是否尝试在群窗口搜索新人昵称或 QQ。
 - `qq_human_group_warmup_group_search_enabled`：找不到来源群窗口时是否尝试聚焦 QQ 并搜索来源群。
+- `qq_human_group_warmup_single_qq_mode`：单 QQ 本机测试模式；电脑上只登录机器人 QQ 时可开启，群搜索后允许直接使用当前 QQ 窗口。
 - `qq_human_group_warmup_force_open_group_protocol_enabled`：是否强制使用 QQ 协议拉群；当前 PC QQ 弹“不支持本功能”时必须保持关闭。
 - `qq_human_group_warmup_deep_hint_enabled`：是否深度扫描 QQ 窗口文字；默认关闭，只有标题/搜索路径找不到目标时再手动打开。
 - `pending_delivery_enabled`：入群时临时私聊被拒绝后，是否挂起发送，等新人先私聊机器人后自动补发资料。
