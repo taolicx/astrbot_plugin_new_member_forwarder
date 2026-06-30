@@ -30,7 +30,7 @@ class TempSessionNotReadyError(RuntimeError):
     PLUGIN_NAME,
     "Codex",
     "管理员私聊录制新人入群资料，新人进群时自动私聊转发文字、图片和聊天记录。",
-    "1.4.49",
+    "1.4.51",
 )
 class NewMemberForwarderPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig | None = None):
@@ -1463,6 +1463,8 @@ class NewMemberForwarderPlugin(Star):
             str(script_path),
             "-Mode",
             "send",
+            "-GroupId",
+            group_id,
             "-GroupRow",
             str(max(1, int(self._get_float("qq_human_group_warmup_group_row", 1)))),
             "-GroupBaseY",
