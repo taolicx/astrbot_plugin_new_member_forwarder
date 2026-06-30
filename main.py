@@ -31,7 +31,7 @@ class TempSessionNotReadyError(RuntimeError):
     PLUGIN_NAME,
     "Codex",
     "管理员私聊录制新人入群资料，新人进群时自动私聊转发文字、图片和聊天记录。",
-    "1.4.21",
+    "1.4.22",
 )
 class NewMemberForwarderPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig | None = None):
@@ -48,6 +48,7 @@ class NewMemberForwarderPlugin(Star):
         self._qq_protocol_warmup_last_at: dict[str, float] = {}
         self._qq_desktop_warmup_last_at: dict[str, float] = {}
         self._qq_desktop_warmup_sent_at: dict[str, float] = {}
+        self._qq_human_group_warmup_last_at: dict[str, float] = {}
         self._test_delivery_running_until = 0.0
         self.data_dir = self._resolve_data_dir()
         self.media_dir = self.data_dir / "media"
@@ -377,6 +378,64 @@ class NewMemberForwarderPlugin(Star):
             return
 
         yield event.plain_result(f"已发送开路消息给 QQ {user_id}，来源群 {group_id}。")
+
+    @filter.platform_adapter_type(filter.PlatformAdapterType.AIOCQHTTP)
+    @filter.command("新人欢迎真人开路测试")
+    async def test_human_group_warmup_delivery(
+        self,
+        event: AstrMessageEvent,
+        target_qq: str = "",
+        source_group_id: str = "",
+    ):
+        if not self._can_run_admin_or_self_command(event):
+            return
+
+        user_id = self._string(target_qq or event.get_sender_id())
+        group_id = self._string(source_group_id or event.get_group_id())
+        text = self._string(self._get("forward_warmup_message_text", "欢迎进群")).strip()
+        if not text:
+            yield event.plain_result("真人开路消息为空，请先在后台设置 forward_warmup_message_text。")
+            return
+        if not user_id.isdigit() or not group_id.isdigit():
+            yield event.plain_result("用法：/新人欢迎真人开路测试 QQ号 来源群号")
+            return
+
+        bot = getattr(event, "bot", None)
+        if not bot:
+            yield event.plain_result("当前事件没有 OneBot bot 实例，无法读取群/成员信息。")
+            return
+
+        self_id = self._string(event.get_self_id())
+        member_name = ""
+        try:
+            member_info = await bot.call_action(
+                "get_group_member_info",
+                group_id=int(group_id),
+                user_id=int(user_id),
+                no_cache=True,
+                **self._routing_kwargs(self_id),
+            )
+            member_name = self._member_display_name(member_info)
+        except Exception as exc:
+            logger.warning(
+                "new_member_forwarder: human warmup test cannot read member info for user %s in group %s: %s",
+                user_id,
+                group_id,
+                self._short_error(exc),
+            )
+        group_name = await self._get_group_display_name(bot, group_id, self_id)
+
+        ok = await self._send_qq_human_group_warmup_message(
+            group_id,
+            user_id,
+            member_name,
+            group_name,
+            force=True,
+        )
+        if ok:
+            yield event.plain_result(f"真人开路已执行：QQ {user_id}，来源群 {group_id}。")
+        else:
+            yield event.plain_result("真人开路未成功执行；请看插件日志里的 human QQ group warmup 失败原因。")
 
     @filter.platform_adapter_type(filter.PlatformAdapterType.AIOCQHTTP)
     @filter.command("新人欢迎诊断")
@@ -1129,13 +1188,24 @@ class NewMemberForwarderPlugin(Star):
         list_status = await self._check_group_member_list(bot, group_id, user_id, self_id)
         if list_status is False:
             return False
+        member_name = self._member_display_name(member_info)
+        group_name = await self._get_group_display_name(bot, group_id, self_id)
+        human_sent = await self._send_qq_human_group_warmup_message(
+            group_id,
+            user_id,
+            member_name,
+            group_name,
+        )
+        if human_sent:
+            return True
         llbot_activated = await self._activate_llbot_temp_context(bot, group_id, user_id)
         opened = await self._open_qq_profile_context(group_id, user_id)
         if llbot_activated or opened:
             await self._send_qq_desktop_warmup_message(
                 group_id,
                 user_id,
-                self._member_display_name(member_info),
+                member_name,
+                group_name,
             )
         return True
 
@@ -1186,11 +1256,80 @@ class NewMemberForwarderPlugin(Star):
             await asyncio.sleep(delay)
         return opened
 
+    async def _send_qq_human_group_warmup_message(
+        self,
+        group_id: str,
+        user_id: str,
+        target_name: str = "",
+        group_name: str = "",
+        *,
+        force: bool = False,
+    ) -> bool:
+        if not force and not self._get_bool("qq_human_group_warmup_enabled", False):
+            return False
+        text = self._string(self._get("forward_warmup_message_text", "欢迎进群")).strip()
+        if not text:
+            return False
+        group_id = self._string(group_id)
+        user_id = self._string(user_id)
+        if not group_id.isdigit() or not user_id.isdigit():
+            return False
+
+        now = time.time()
+        key = f"{group_id}:{user_id}"
+        cooldown = max(0.0, self._get_float("qq_human_group_warmup_cooldown_seconds", 90.0))
+        last_at = self._qq_human_group_warmup_last_at.get(key, 0.0)
+        if not force and cooldown and now - last_at < cooldown:
+            return self._recent_desktop_warmup_sent(group_id, user_id)
+        self._qq_human_group_warmup_last_at[key] = now
+
+        timeout = max(8.0, self._get_float("qq_human_group_warmup_timeout_seconds", 45.0))
+        try:
+            result = await asyncio.to_thread(
+                self._run_qq_human_group_warmup_script,
+                group_id,
+                user_id,
+                target_name,
+                group_name,
+                text,
+                timeout,
+            )
+        except Exception as exc:
+            logger.warning(
+                "new_member_forwarder: human QQ group warmup failed for user %s in group %s: %s",
+                user_id,
+                group_id,
+                self._short_error(exc),
+            )
+            return False
+
+        if result.get("ok"):
+            self._qq_desktop_warmup_sent_at[key] = time.time()
+            logger.info(
+                "new_member_forwarder: sent human QQ group warmup for user %s in group %s: %s",
+                user_id,
+                group_id,
+                result.get("reason") or "ok",
+            )
+            post_delay = max(0.0, self._get_float("qq_human_group_warmup_post_send_delay_seconds", 1.5))
+            if post_delay:
+                await asyncio.sleep(post_delay)
+            return True
+
+        logger.warning(
+            "new_member_forwarder: human QQ group warmup did not send for user %s in group %s: %s",
+            user_id,
+            group_id,
+            result.get("reason") or result,
+        )
+        return False
+
     async def _send_qq_desktop_warmup_message(
         self,
         group_id: str,
         user_id: str,
         target_name: str = "",
+        group_name: str = "",
     ) -> bool:
         if not self._get_bool("qq_desktop_warmup_enabled", False):
             return False
@@ -1217,6 +1356,7 @@ class NewMemberForwarderPlugin(Star):
                 group_id,
                 user_id,
                 target_name,
+                group_name,
                 text,
                 timeout,
             )
@@ -1260,11 +1400,469 @@ class NewMemberForwarderPlugin(Star):
         window = max(3.0, self._get_float("qq_desktop_warmup_sent_window_seconds", 180.0))
         return bool(last_at and time.time() - last_at <= window)
 
+    def _run_qq_human_group_warmup_script(
+        self,
+        group_id: str,
+        user_id: str,
+        target_name: str,
+        group_name: str,
+        text: str,
+        timeout: float,
+    ) -> dict[str, Any]:
+        script = r"""
+$ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName UIAutomationClient
+Add-Type -AssemblyName UIAutomationTypes
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+public class NmfHumanWin32 {
+  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
+  [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern bool ShowWindowAsync(IntPtr hWnd, int nCmdShow);
+  [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
+  [DllImport("user32.dll")] public static extern void mouse_event(uint flags, uint dx, uint dy, uint data, UIntPtr extra);
+  [DllImport("user32.dll")] public static extern void keybd_event(byte vk, byte scan, uint flags, UIntPtr extra);
+}
+"@
+
+function Out-Result([bool]$ok, [string]$reason, [string]$stage) {
+  @{ ok = $ok; reason = $reason; stage = $stage } | ConvertTo-Json -Compress
+}
+
+function Is-True([string]$value) {
+  $v = ($value + '').Trim().ToLowerInvariant()
+  return @('1','true','yes','on') -contains $v
+}
+
+function Press-Key([byte]$vk) {
+  [NmfHumanWin32]::keybd_event($vk, 0, 0, [UIntPtr]::Zero)
+  Start-Sleep -Milliseconds 55
+  [NmfHumanWin32]::keybd_event($vk, 0, 2, [UIntPtr]::Zero)
+}
+
+function Press-CtrlKey([byte]$vk) {
+  [NmfHumanWin32]::keybd_event(0x11, 0, 0, [UIntPtr]::Zero)
+  Start-Sleep -Milliseconds 30
+  Press-Key $vk
+  [NmfHumanWin32]::keybd_event(0x11, 0, 2, [UIntPtr]::Zero)
+}
+
+function Set-ClipboardTextSafe([string]$text) {
+  for ($i = 0; $i -lt 12; $i++) {
+    try {
+      [System.Windows.Forms.Clipboard]::SetText($text)
+      return $true
+    } catch {
+      Start-Sleep -Milliseconds 120
+    }
+  }
+  return $false
+}
+
+function Paste-TextOnly([string]$text) {
+  if (-not (Set-ClipboardTextSafe $text)) { return $false }
+  Press-CtrlKey 0x56
+  Start-Sleep -Milliseconds 260
+  return $true
+}
+
+function Paste-And-Enter([string]$text) {
+  $oldText = $null
+  try {
+    if ([System.Windows.Forms.Clipboard]::ContainsText()) {
+      $oldText = [System.Windows.Forms.Clipboard]::GetText()
+    }
+  } catch {}
+  if (-not (Paste-TextOnly $text)) { return $false }
+  Start-Sleep -Milliseconds 220
+  Press-Key 0x0D
+  Start-Sleep -Milliseconds 450
+  if ($oldText -ne $null) {
+    try { [System.Windows.Forms.Clipboard]::SetText($oldText) } catch {}
+  }
+  return $true
+}
+
+function Get-ElementName($element) {
+  try { return $element.Current.Name + '' } catch {}
+  return ''
+}
+
+function Get-ElementTextBundle($element) {
+  $parts = New-Object System.Collections.ArrayList
+  foreach ($prop in @('Name','AutomationId','ClassName','HelpText')) {
+    try {
+      $value = $element.Current.$prop + ''
+      if ($value) { [void]$parts.Add($value) }
+    } catch {}
+  }
+  return ($parts -join "`n")
+}
+
+function Get-ValidHints([string[]]$hints) {
+  return @($hints | Where-Object { ($_ + '').Trim().Length -gt 0 })
+}
+
+function Element-Has-Hint($element, [string[]]$hints) {
+  $validHints = Get-ValidHints $hints
+  if ($validHints.Count -eq 0) { return $false }
+  try {
+    $text = Get-ElementTextBundle $element
+    foreach ($hint in $validHints) {
+      if ($text.Contains($hint)) { return $true }
+    }
+    if (-not (Is-True $env:NMF_DEEP_HINT)) { return $false }
+    $all = $element.FindAll([System.Windows.Automation.TreeScope]::Descendants, [System.Windows.Automation.Condition]::TrueCondition)
+    foreach ($item in $all) {
+      $name = Get-ElementTextBundle $item
+      if (-not $name) { continue }
+      foreach ($hint in $validHints) {
+        if ($name.Contains($hint)) { return $true }
+      }
+    }
+  } catch {}
+  return $false
+}
+
+function Get-RectScore($element) {
+  try {
+    $rect = $element.Current.BoundingRectangle
+    if ($rect.Width -le 0 -or $rect.Height -le 0) { return -1000 }
+    if ($rect.Width -gt 900 -or $rect.Height -gt 260) { return -5 }
+    return 0
+  } catch {}
+  return -1000
+}
+
+function Invoke-Element($element, [bool]$doubleClick) {
+  if (-not $doubleClick) {
+    $pattern = $null
+    try {
+      if ($element.TryGetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern, [ref]$pattern)) {
+        $pattern.Invoke()
+        return $true
+      }
+    } catch {}
+  }
+  try {
+    $rect = $element.Current.BoundingRectangle
+    if ($rect.Width -le 0 -or $rect.Height -le 0) { return $false }
+    $x = [int]($rect.Left + [Math]::Min([Math]::Max($rect.Width / 2, 12), $rect.Width - 8))
+    $y = [int]($rect.Top + $rect.Height / 2)
+    [NmfHumanWin32]::SetCursorPos($x, $y) | Out-Null
+    Start-Sleep -Milliseconds 90
+    $clicks = 1
+    if ($doubleClick) { $clicks = 2 }
+    for ($i = 0; $i -lt $clicks; $i++) {
+      [NmfHumanWin32]::mouse_event(2, 0, 0, 0, [UIntPtr]::Zero)
+      Start-Sleep -Milliseconds 75
+      [NmfHumanWin32]::mouse_event(4, 0, 0, 0, [UIntPtr]::Zero)
+      Start-Sleep -Milliseconds 110
+    }
+    return $true
+  } catch {}
+  return $false
+}
+
+function Focus-Window($win) {
+  try {
+    [NmfHumanWin32]::ShowWindowAsync([IntPtr]$win.Current.NativeWindowHandle, 5) | Out-Null
+    [NmfHumanWin32]::SetForegroundWindow([IntPtr]$win.Current.NativeWindowHandle) | Out-Null
+    Start-Sleep -Milliseconds 350
+    return $true
+  } catch {}
+  return $false
+}
+
+function Get-QQWindows {
+  $names = @('QQ','llbot','LLOneBot')
+  $allPids = New-Object System.Collections.ArrayList
+  foreach ($name in $names) {
+    try {
+      foreach ($proc in @(Get-Process $name -ErrorAction SilentlyContinue)) {
+        if ($proc.Id -and -not $allPids.Contains($proc.Id)) { [void]$allPids.Add($proc.Id) }
+      }
+    } catch {}
+  }
+  if ($allPids.Count -eq 0) { return @() }
+  $root = [System.Windows.Automation.AutomationElement]::RootElement
+  $children = $root.FindAll([System.Windows.Automation.TreeScope]::Children, [System.Windows.Automation.Condition]::TrueCondition)
+  $result = New-Object System.Collections.ArrayList
+  foreach ($win in $children) {
+    try {
+      if ($allPids.Contains($win.Current.ProcessId) -and $win.Current.NativeWindowHandle -ne 0) {
+        [void]$result.Add($win)
+      }
+    } catch {}
+  }
+  return @($result)
+}
+
+function Open-GroupByProtocol([string]$groupId) {
+  if (-not (Is-True $env:NMF_OPEN_GROUP_PROTOCOL)) { return }
+  foreach ($url in @(
+    "mqqapi://im/chat?chat_type=group&uin=$groupId&version=1&src_type=web",
+    "mqqapi://im/chat?chat_type=group&groupuin=$groupId&version=1&src_type=web"
+  )) {
+    try {
+      Start-Process $url | Out-Null
+      Start-Sleep -Milliseconds 900
+    } catch {}
+  }
+}
+
+function Find-GroupWindow([string[]]$groupHints, [bool]$requireGroupHint) {
+  $windows = Get-QQWindows
+  $best = $null
+  $bestScore = -1
+  foreach ($win in $windows) {
+    $hasGroup = Element-Has-Hint $win $groupHints
+    if ($requireGroupHint -and -not $hasGroup) { continue }
+    $score = 1
+    if ($hasGroup) { $score += 100 }
+    $title = Get-ElementName $win
+    foreach ($hint in (Get-ValidHints $groupHints)) {
+      if ($title.Contains($hint)) { $score += 30 }
+    }
+    if ($score -gt $bestScore) {
+      $best = $win
+      $bestScore = $score
+    }
+  }
+  return $best
+}
+
+function Find-TargetElement($root, [string[]]$targetHints) {
+  $validHints = Get-ValidHints $targetHints
+  if ($validHints.Count -eq 0) { return $null }
+  $best = $null
+  $bestScore = -1000
+  try {
+    $all = $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, [System.Windows.Automation.Condition]::TrueCondition)
+    foreach ($item in $all) {
+      $text = Get-ElementTextBundle $item
+      if (-not $text) { continue }
+      $score = Get-RectScore $item
+      if ($score -le -1000) { continue }
+      foreach ($hint in $validHints) {
+        if ($text.Contains($hint)) {
+          $score += 50
+          if ((Get-ElementName $item) -eq $hint) { $score += 35 }
+        }
+      }
+      if ($score -lt 45) { continue }
+      try {
+        $ctype = $item.Current.ControlType.ProgrammaticName + ''
+        if ($ctype -match 'Button|Image|Hyperlink|ListItem|TreeItem|DataItem') { $score += 25 }
+        elseif ($ctype -match 'Text') { $score += 8 }
+      } catch {}
+      if ($score -gt $bestScore) {
+        $best = $item
+        $bestScore = $score
+      }
+    }
+  } catch {}
+  return $best
+}
+
+function Try-SearchTargetInGroup($groupWin, [string]$targetName, [string]$targetUserId) {
+  if (-not (Is-True $env:NMF_MEMBER_SEARCH)) { return $false }
+  $query = $targetName
+  if (-not $query) { $query = $targetUserId }
+  if (-not $query) { return $false }
+  Focus-Window $groupWin | Out-Null
+  Press-CtrlKey 0x46
+  Start-Sleep -Milliseconds 300
+  Paste-TextOnly $query | Out-Null
+  Start-Sleep -Milliseconds 900
+  return $true
+}
+
+function Find-SendButton($root, [string]$buttonRegex) {
+  try {
+    $all = $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, [System.Windows.Automation.Condition]::TrueCondition)
+    foreach ($item in $all) {
+      $name = Get-ElementName $item
+      if (-not $name) { continue }
+      if ($name -match $buttonRegex) {
+        return $item
+      }
+    }
+  } catch {}
+  return $null
+}
+
+function Try-ClickSendMessageButton([string[]]$targetHints, [string]$buttonRegex, [bool]$requireTargetHint) {
+  foreach ($win in (Get-QQWindows)) {
+    if ($requireTargetHint -and -not (Element-Has-Hint $win $targetHints)) { continue }
+    $button = Find-SendButton $win $buttonRegex
+    if ($button -ne $null) {
+      Focus-Window $win | Out-Null
+      if (Invoke-Element $button $false) {
+        Start-Sleep -Milliseconds 1000
+        return $true
+      }
+    }
+  }
+  return $false
+}
+
+function Try-PasteIntoOpenedTargetChat([string[]]$targetHints, [string[]]$groupHints, [bool]$requireTargetHint, [string]$text) {
+  foreach ($win in (Get-QQWindows)) {
+    $hasTarget = Element-Has-Hint $win $targetHints
+    if ($requireTargetHint -and -not $hasTarget) { continue }
+    if (Element-Has-Hint $win $groupHints) { continue }
+    Focus-Window $win | Out-Null
+    if (Paste-And-Enter $text) { return $true }
+  }
+  return $false
+}
+
+$text = $env:NMF_WARMUP_TEXT
+$groupId = $env:NMF_GROUP_ID
+$groupName = $env:NMF_GROUP_NAME
+$targetUserId = $env:NMF_TARGET_USER_ID
+$targetName = $env:NMF_TARGET_NAME
+$requireGroupHint = Is-True $env:NMF_REQUIRE_GROUP_HINT
+$requireTargetHint = Is-True $env:NMF_REQUIRE_TARGET_HINT
+$buttonRegex = $env:NMF_BUTTON_REGEX
+if (-not $buttonRegex) { $buttonRegex = '\u53d1\u6d88\u606f|\u53d1\u9001\u6d88\u606f|\u804a\u5929|\u79c1\u804a' }
+$waitSeconds = 20.0
+try { $waitSeconds = [double]$env:NMF_WAIT_SECONDS } catch {}
+$groupHints = @($groupName, $groupId)
+$targetHints = @($targetUserId, $targetName)
+
+Open-GroupByProtocol $groupId
+$deadline = (Get-Date).AddSeconds($waitSeconds)
+$groupWin = $null
+while ((Get-Date) -lt $deadline -and $groupWin -eq $null) {
+  $groupWin = Find-GroupWindow $groupHints $requireGroupHint
+  if ($groupWin -eq $null) { Start-Sleep -Milliseconds 450 }
+}
+if ($groupWin -eq $null) {
+  Out-Result $false 'group_window_not_found_or_group_hint_missing' 'group'
+  exit 0
+}
+
+Focus-Window $groupWin | Out-Null
+$searched = $false
+while ((Get-Date) -lt $deadline) {
+  $target = Find-TargetElement $groupWin $targetHints
+  if ($target -ne $null) {
+    if (Invoke-Element $target $false) {
+      Start-Sleep -Milliseconds 950
+      if (Try-ClickSendMessageButton $targetHints $buttonRegex $requireTargetHint) {
+        if (Paste-And-Enter $text) {
+          Out-Result $true 'sent_after_group_member_profile_button' 'send_button'
+          exit 0
+        }
+      }
+    }
+    if (Invoke-Element $target $true) {
+      Start-Sleep -Milliseconds 1200
+      if (Try-ClickSendMessageButton $targetHints $buttonRegex $requireTargetHint) {
+        if (Paste-And-Enter $text) {
+          Out-Result $true 'sent_after_group_member_double_click_button' 'send_button'
+          exit 0
+        }
+      }
+      if (Try-PasteIntoOpenedTargetChat $targetHints $groupHints $requireTargetHint $text) {
+        Out-Result $true 'sent_after_group_member_double_click_chat' 'direct_chat'
+        exit 0
+      }
+    }
+  }
+  if (-not $searched) {
+    $searched = Try-SearchTargetInGroup $groupWin $targetName $targetUserId
+  }
+  Start-Sleep -Milliseconds 650
+}
+
+Out-Result $false 'target_member_or_send_message_button_not_found' 'target'
+"""
+        env = os.environ.copy()
+        env.update(
+            {
+                "NMF_GROUP_ID": group_id,
+                "NMF_GROUP_NAME": group_name or "",
+                "NMF_TARGET_USER_ID": user_id,
+                "NMF_TARGET_NAME": target_name or "",
+                "NMF_WARMUP_TEXT": text,
+                "NMF_WAIT_SECONDS": str(max(3.0, self._get_float("qq_human_group_warmup_wait_seconds", 20.0))),
+                "NMF_REQUIRE_GROUP_HINT": "1"
+                if self._get_bool("qq_human_group_warmup_require_group_hint", True)
+                else "0",
+                "NMF_REQUIRE_TARGET_HINT": "1"
+                if self._get_bool("qq_human_group_warmup_require_target_hint", True)
+                else "0",
+                "NMF_MEMBER_SEARCH": "1"
+                if self._get_bool("qq_human_group_warmup_member_search_enabled", True)
+                else "0",
+                "NMF_OPEN_GROUP_PROTOCOL": "1"
+                if self._get_bool("qq_human_group_warmup_open_group_protocol_enabled", True)
+                else "0",
+                "NMF_DEEP_HINT": "1"
+                if self._get_bool("qq_human_group_warmup_deep_hint_enabled", True)
+                else "0",
+                "NMF_BUTTON_REGEX": self._string(
+                    self._get(
+                        "qq_human_group_warmup_button_regex",
+                        r"\u53d1\u6d88\u606f|\u53d1\u9001\u6d88\u606f|\u804a\u5929|\u79c1\u804a",
+                    )
+                ),
+            }
+        )
+        encoded = base64.b64encode(script.encode("utf-16le")).decode("ascii")
+        command = [
+            "powershell.exe",
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-STA",
+            "-EncodedCommand",
+            encoded,
+        ]
+        completed = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=env,
+            timeout=timeout,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        stdout = (completed.stdout or "").strip()
+        stderr = (completed.stderr or "").strip()
+        last_line = stdout.splitlines()[-1].strip() if stdout else ""
+        if last_line:
+            try:
+                result = json.loads(last_line)
+                if isinstance(result, dict):
+                    if completed.returncode and not result.get("ok"):
+                        result["returncode"] = completed.returncode
+                    return result
+            except json.JSONDecodeError:
+                pass
+        return {
+            "ok": False,
+            "reason": self._short_error(
+                RuntimeError(stderr or stdout or f"powershell exited with {completed.returncode}"),
+                300,
+            ),
+            "returncode": completed.returncode,
+        }
+
     def _run_qq_desktop_warmup_script(
         self,
         group_id: str,
         user_id: str,
         target_name: str,
+        group_name: str,
         text: str,
         timeout: float,
     ) -> dict[str, Any]:
@@ -1471,6 +2069,7 @@ Out-Result $false 'target_qq_window_or_send_button_not_found' 'wait'
         env.update(
             {
                 "NMF_GROUP_ID": group_id,
+                "NMF_GROUP_NAME": group_name or "",
                 "NMF_TARGET_USER_ID": user_id,
                 "NMF_TARGET_NAME": target_name or "",
                 "NMF_WARMUP_TEXT": text,
@@ -1920,6 +2519,27 @@ Out-Result $false 'target_qq_window_or_send_button_not_found' 'wait'
             return ""
         for key in ("card_or_nickname", "card", "nickname", "nick", "name", "user_name"):
             value = self._string(member.get(key))
+            if value:
+                return value
+        return ""
+
+    async def _get_group_display_name(self, bot: Any, group_id: str, self_id: str = "") -> str:
+        group_id = self._string(group_id)
+        if not group_id.isdigit():
+            return ""
+        try:
+            info = await bot.call_action(
+                "get_group_info",
+                group_id=int(group_id),
+                no_cache=False,
+                **self._routing_kwargs(self_id),
+            )
+        except Exception:
+            return ""
+        if not isinstance(info, dict):
+            return ""
+        for key in ("group_name", "groupName", "name"):
+            value = self._string(info.get(key))
             if value:
                 return value
         return ""

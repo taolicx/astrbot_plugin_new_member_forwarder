@@ -64,6 +64,61 @@
     "description": "QQ protocol URL templates. Supports {user_id} and {group_id}. Leave empty to use built-in group profile/chat templates.",
     "default": []
   },
+  "qq_human_group_warmup_enabled": {
+    "type": "bool",
+    "description": "启用真人式 QQ 桌面开路：打开来源群，找到新人，点击发消息，再发送开路文字。",
+    "default": false
+  },
+  "qq_human_group_warmup_wait_seconds": {
+    "type": "float",
+    "description": "真人式开路时等待 QQ 群窗口、成员卡片和私聊窗口出现的秒数。",
+    "default": 20.0
+  },
+  "qq_human_group_warmup_timeout_seconds": {
+    "type": "float",
+    "description": "真人式开路 PowerShell 辅助进程的总超时秒数。",
+    "default": 45.0
+  },
+  "qq_human_group_warmup_post_send_delay_seconds": {
+    "type": "float",
+    "description": "真人式开路文字发送成功后，等待多少秒再继续发送录制资料。",
+    "default": 1.5
+  },
+  "qq_human_group_warmup_cooldown_seconds": {
+    "type": "float",
+    "description": "同一群同一新人在多少秒内不重复执行真人式开路。",
+    "default": 90.0
+  },
+  "qq_human_group_warmup_require_group_hint": {
+    "type": "bool",
+    "description": "只在 QQ 窗口里能识别到来源群号或群名时才点击，双 QQ 登录时建议保持开启。",
+    "default": true
+  },
+  "qq_human_group_warmup_require_target_hint": {
+    "type": "bool",
+    "description": "只在 QQ 窗口或资料卡里能识别到新人 QQ 或昵称时才点击发消息。",
+    "default": true
+  },
+  "qq_human_group_warmup_member_search_enabled": {
+    "type": "bool",
+    "description": "在群窗口中找不到新人时，尝试用 Ctrl+F 搜索新人昵称或 QQ。",
+    "default": true
+  },
+  "qq_human_group_warmup_open_group_protocol_enabled": {
+    "type": "bool",
+    "description": "执行真人式开路前先通过 QQ 协议拉起来源群窗口；后续仍会校验群窗口线索。",
+    "default": true
+  },
+  "qq_human_group_warmup_deep_hint_enabled": {
+    "type": "bool",
+    "description": "深度扫描 QQ 窗口文字来识别群和新人线索；更安全但可能稍慢。",
+    "default": true
+  },
+  "qq_human_group_warmup_button_regex": {
+    "type": "string",
+    "description": "真人式开路识别 QQ 资料卡“发消息/聊天”按钮的正则。",
+    "default": "\\u53d1\\u6d88\\u606f|\\u53d1\\u9001\\u6d88\\u606f|\\u804a\\u5929|\\u79c1\\u804a"
+  },
   "qq_desktop_warmup_enabled": {
     "type": "bool",
     "description": "Use Windows desktop automation to click QQ profile/chat and send the first warmup text.",

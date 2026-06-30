@@ -34,6 +34,13 @@
 - 插件会把该新人加入挂起补发队列，并可在群里 @ 提醒新人先私聊机器人。
 - 新人主动私聊机器人后，插件会用已经打开的私聊链路继续发送原始聊天记录卡片和其他资料。
 
+真人式 QQ 桌面开路：
+
+- 默认关闭，打开 `qq_human_group_warmup_enabled` 后才会在新人入群时执行。
+- 执行顺序是：拉起/聚焦来源群窗口，识别来源群，找新人昵称或 QQ，点击资料卡里的“发消息/聊天”，发送 `forward_warmup_message_text`。
+- 这一步只负责发送额外第一条开路文字；成功后仍继续走原来的原始聊天记录卡片转发链路，不拆聊天记录、不重建兜底。
+- 双 QQ 登录时建议保持 `qq_human_group_warmup_require_group_hint` 和 `qq_human_group_warmup_require_target_hint` 开启，避免点错窗口。
+
 也可以使用更明确的控制词：
 
 - `新人欢迎开始`
@@ -50,6 +57,7 @@
 - `状态`：查看是否正在录制、当前录了几条、已保存几条。
 - `清空`：清空已保存资料。
 - `/新人欢迎测试 [QQ号] [来源群号]`：把已保存资料私聊发送给指定 QQ；带来源群号时会按该群的临时会话路径测试；管理员发送、机器人自身消息上报、以及机器人通过 AstrBot 发出的同名文本都可以触发。
+- `/新人欢迎真人开路测试 QQ号 来源群号`：强制执行一次真人式 QQ 桌面开路，用于远端测试，不需要等新人入群。
 - `/新人欢迎诊断 QQ号 来源群号`：检查 llbot 是否能在来源群成员列表里看到该 QQ，用来判断临时会话失败原因。
 - `/添加一图回复图片`：私聊机器人后直接发送图片，保存为一图回复图片。
 - `/添加两图回复图片`：私聊机器人后直接发送图片，保存为两图回复图片。
@@ -81,6 +89,10 @@ AstrBot/data/plugins/astrbot_plugin_new_member_forwarder
 - `forward_warmup_message_enabled`：发送录制资料前额外发送第一条普通私聊开路消息；该消息不需要录制。
 - `forward_warmup_message_text`：额外第一条开路消息内容，后台可直接修改；留空则不发送。
 - `forward_warmup_delay_seconds`：开路消息发送成功后，等待多少秒再发送录制资料。
+- `qq_human_group_warmup_enabled`：是否启用真人式 QQ 桌面开路。
+- `qq_human_group_warmup_wait_seconds` / `qq_human_group_warmup_timeout_seconds`：真人式开路查找窗口和总超时。
+- `qq_human_group_warmup_require_group_hint` / `qq_human_group_warmup_require_target_hint`：是否强制校验来源群和新人线索，双 QQ 登录建议开启。
+- `qq_human_group_warmup_member_search_enabled`：找不到新人时是否尝试在群窗口搜索新人昵称或 QQ。
 - `pending_delivery_enabled`：入群时临时私聊被拒绝后，是否挂起发送，等新人先私聊机器人后自动补发资料。
 - `pending_expire_seconds`：挂起补发记录保留秒数；默认 `86400`。
 - `pending_delivery_notice_enabled`：挂起补发时是否在群里提醒新人先私聊机器人。
