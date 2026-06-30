@@ -726,9 +726,10 @@ if ($TargetQQ) {
     Write-TraceStage ("group-panel-retry-score=" + ($groupScore | ConvertTo-Json -Compress))
   }
   if (-not $groupScore.GroupPanelDetected) {
-    throw ("pinned group was not opened after two clicks; score=" + ($groupScore | ConvertTo-Json -Compress))
+    Write-TraceStage ("group-panel-not-detected-continue-member-search score=" + ($groupScore | ConvertTo-Json -Compress))
+    [void]$shots.Add((Save-Shot $main "02c-group-panel-not-detected-continue.png"))
   }
-  [void]$steps.Add("group-panel-ok")
+  [void]$steps.Add("group-open-attempted")
 } else {
   Write-TraceStage "check-group-panel-probe"
   $groupScore = Wait-ForGroupPanel $main $WaitSeconds
