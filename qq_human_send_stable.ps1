@@ -1,4 +1,4 @@
-param(
+﻿param(
   [ValidateSet("probe", "send", "calibrate")]
   [string]$Mode = "probe",
   [int]$GroupRow = 1,
@@ -775,7 +775,7 @@ function Get-StoredCalibrationPoint($Calibration, [string]$Name) {
 function Wait-CalibratedCursorPoint($Frame, [string]$Name, [string]$Anchor, [string]$Title, [string]$Instruction, [int]$TimeoutSeconds) {
   Write-TraceStage ("calibrate-wait " + $Name)
   $form = New-Object System.Windows.Forms.Form
-  $form.Text = "NMF Calibration"
+  $form.Text = "新人欢迎校准"
   $form.TopMost = $true
   $form.Width = 520
   $form.Height = 180
@@ -828,8 +828,8 @@ function Invoke-Calibration {
   [void]$shots.Add((Save-Shot $mainFrame "calibrate-01-main-start.png"))
 
   $points = [ordered]@{}
-  $points.pinnedGroup = Wait-CalibratedCursorPoint $mainFrame "pinnedGroup" "main" "1/5 pinned group row" "Put the mouse on the pinned target group row in the left conversation list. Do not click." 180
-  $points.memberSearchInput = Wait-CalibratedCursorPoint $mainFrame "memberSearchInput" "main" "2/5 member search box" "Put the mouse on the member search box or search icon in the right member panel. Do not click." 180
+  $points.pinnedGroup = Wait-CalibratedCursorPoint $mainFrame "pinnedGroup" "main" "1/5 置顶目标群" "把鼠标放到左侧会话列表里的置顶目标群这一行，不要点击，然后按 F8。" 180
+  $points.memberSearchInput = Wait-CalibratedCursorPoint $mainFrame "memberSearchInput" "main" "2/5 群成员搜索框" "把鼠标放到右侧群成员栏的搜索框或搜索图标上，不要点击，然后按 F8。" 180
 
   $memberSearch = Get-CalibratedPoint ([pscustomobject]@{ points = [pscustomobject]$points }) "memberSearchInput" $mainFrame
   Click-At $memberSearch.X $memberSearch.Y
@@ -843,23 +843,23 @@ function Invoke-Calibration {
   }
   [void]$shots.Add((Save-Shot $mainFrame "calibrate-02-after-search-input.png"))
 
-  $points.searchResultFirst = Wait-CalibratedCursorPoint $mainFrame "searchResultFirst" "main" "3/5 first search result" "Put the mouse on the avatar or name of the first search result in the right panel. Do not click." 180
+  $points.searchResultFirst = Wait-CalibratedCursorPoint $mainFrame "searchResultFirst" "main" "3/5 第一条搜索结果" "把鼠标放到右侧第一条搜索结果的头像或昵称上，不要点击，然后按 F8。" 180
   $resultPoint = Get-CalibratedPoint ([pscustomobject]@{ points = [pscustomobject]$points }) "searchResultFirst" $mainFrame
   Click-At $resultPoint.X $resultPoint.Y
   $profileFrame = Try-WaitForProfile 8
   if ($profileFrame) {
     [void]$shots.Add((Save-Shot $profileFrame "calibrate-03-profile.png"))
-    $points.profileSendButton = Wait-CalibratedCursorPoint $profileFrame "profileSendButton" "profile" "4/5 profile send button" "Put the mouse on the send-message button in the profile card. Do not click." 180
+    $points.profileSendButton = Wait-CalibratedCursorPoint $profileFrame "profileSendButton" "profile" "4/5 资料卡发消息按钮" "把鼠标放到资料卡里的发消息按钮上，不要点击，然后按 F8。" 180
     $sendPoint = Get-CalibratedPoint ([pscustomobject]@{ points = [pscustomobject]$points }) "profileSendButton" $profileFrame
     Click-At $sendPoint.X $sendPoint.Y
   } else {
-    [System.Windows.Forms.MessageBox]::Show("Open any member profile card manually, then click OK here.", "NMF Calibration", "OK", "Information") | Out-Null
+    [System.Windows.Forms.MessageBox]::Show("没有自动打开资料卡。请手动打开任意群成员资料卡，然后点这里的确定继续校准。", "新人欢迎校准", "OK", "Information") | Out-Null
     $profileFrame = Try-WaitForProfile 30
     if (-not $profileFrame) {
       throw "profile card was not detected during calibration"
     }
     [void]$shots.Add((Save-Shot $profileFrame "calibrate-03-profile-manual.png"))
-    $points.profileSendButton = Wait-CalibratedCursorPoint $profileFrame "profileSendButton" "profile" "4/5 profile send button" "Put the mouse on the send-message button in the profile card. Do not click." 180
+    $points.profileSendButton = Wait-CalibratedCursorPoint $profileFrame "profileSendButton" "profile" "4/5 资料卡发消息按钮" "把鼠标放到资料卡里的发消息按钮上，不要点击，然后按 F8。" 180
     $sendPoint = Get-CalibratedPoint ([pscustomobject]@{ points = [pscustomobject]$points }) "profileSendButton" $profileFrame
     Click-At $sendPoint.X $sendPoint.Y
   }
@@ -868,7 +868,7 @@ function Invoke-Calibration {
   $script:MainHandleValue = $mainFrame.HandleValue
   Focus-Maximized $mainFrame.Handle
   [void]$shots.Add((Save-Shot $mainFrame "calibrate-04-private-chat.png"))
-  $points.privateChatInput = Wait-CalibratedCursorPoint $mainFrame "privateChatInput" "main" "5/5 private chat input" "Put the mouse inside the private chat input box at the bottom. Do not click." 180
+  $points.privateChatInput = Wait-CalibratedCursorPoint $mainFrame "privateChatInput" "main" "5/5 私聊输入框" "把鼠标放到底部私聊输入框里，不要点击，然后按 F8。" 180
 
   $payload = [ordered]@{
     version = 1
