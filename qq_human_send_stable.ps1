@@ -855,13 +855,20 @@ function Wait-ForPrivateChatQuick([int]$Milliseconds, [string]$Prefix) {
   return $null
 }
 
-function Click-ContextMenuSendMessage([object]$Frame, [int]$RightClickX, [int]$RightClickY, [string]$Prefix) {
+function Click-ContextMenuSendMessage([object]$Frame, [int]$RightClickX, [int]$RightClickY, [string]$Prefix, $Calibration = $null) {
   $menuShot = Save-Shot $Frame ($Prefix + "-context-menu.png")
   [void]$shots.Add($menuShot)
+  $calibratedMenu = Get-CalibratedPoint $Calibration "contextMenuSendMessage" $Frame
+  if ($calibratedMenu) {
+    $script:CalibrationUsed = $true
+    Write-TraceStage ("click-context-menu-send-message-calibrated x=" + $calibratedMenu.X + " y=" + $calibratedMenu.Y)
+    Click-At $calibratedMenu.X $calibratedMenu.Y
+    return $true
+  }
   try {
     foreach ($line in @(Read-ImageOcrLines $menuShot)) {
       $text = (($line.Text + "") -replace "\s+", "")
-      if (-not ($text -like "*发送消息*" -or $text -like "*发消息*")) { continue }
+      if (-not ($text -like "*发送消息*" -or $text -like "*发消息*" -or $text -like "*发起私信*" -or $text -like "*私信*")) { continue }
       $centerX = [int]($Frame.Left + [double]$line.Left + ([double]$line.Width / 2.0))
       $centerY = [int]($Frame.Top + [double]$line.Top + ([double]$line.Height / 2.0))
       if ([Math]::Abs($centerX - $RightClickX) -gt 280) { continue }
@@ -999,7 +1006,7 @@ function Open-SearchResultPrivateChat($MainFrame, [int]$BaseY, $Calibration = $n
     RightClick-At ([int]$pt.X) ([int]$pt.Y)
     $fresh = Get-MainQQWindow
     $script:MainHandleValue = $fresh.HandleValue
-    [void](Click-ContextMenuSendMessage $fresh ([int]$pt.X) ([int]$pt.Y) ($Prefix + "-" + $pt.Label))
+    [void](Click-ContextMenuSendMessage $fresh ([int]$pt.X) ([int]$pt.Y) ($Prefix + "-" + $pt.Label) $Calibration)
     $privateFrame = Wait-ForPrivateChatQuick 3600 ($Prefix + "-" + $pt.Label)
     if ($privateFrame) {
       return (New-PrivateChatOpenedResult $privateFrame ("context-menu-" + $pt.Label))
@@ -1130,6 +1137,27 @@ function Wait-CalibratedCursorPoint($Frame, [string]$Name, [string]$Anchor, [str
   throw ("calibration timeout waiting for " + $Name)
 }
 
+function Wait-CalibratedCursorPointSilent($Frame, [string]$Name, [string]$Anchor, [int]$TimeoutSeconds) {
+  Write-TraceStage ("calibrate-wait-silent " + $Name)
+  $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+  while ((Get-Date) -lt $deadline) {
+    if (([NmfStable]::GetAsyncKeyState(0x1B) -band 0x8000) -ne 0) {
+      throw "calibration canceled by ESC"
+    }
+    if (([NmfStable]::GetAsyncKeyState(0x77) -band 0x8000) -ne 0) {
+      while (([NmfStable]::GetAsyncKeyState(0x77) -band 0x8000) -ne 0) {
+        Start-Sleep -Milliseconds 40
+      }
+      $cursor = New-Object NmfStable+POINT
+      [NmfStable]::GetCursorPos([ref]$cursor) | Out-Null
+      Write-TraceStage ("calibrate-captured-silent " + $Name + " x=" + $cursor.X + " y=" + $cursor.Y)
+      return New-RelativePoint $Frame ([int]$cursor.X) ([int]$cursor.Y) $Anchor
+    }
+    Start-Sleep -Milliseconds 60
+  }
+  throw ("calibration timeout waiting for " + $Name)
+}
+
 function Invoke-Calibration {
   if (-not $CalibrationFile) {
     throw "CalibrationFile is required in calibrate mode"
@@ -1159,23 +1187,26 @@ function Invoke-Calibration {
   }
   [void]$shots.Add((Save-Shot $mainFrame "calibrate-02-after-search-input.png"))
 
-  $points.searchResultFirst = Wait-CalibratedCursorPoint $mainFrame "searchResultFirst" "main" "3/4 第一条搜索结果" "把鼠标放到右侧第一条搜索结果的头像或昵称上，不要点击，然后按 F8。校准脚本会右键它并选择发送消息。" 180
+  $points.searchResultFirst = Wait-CalibratedCursorPoint $mainFrame "searchResultFirst" "main" "3/5 第一条搜索结果" "把鼠标放到右侧第一条搜索结果的头像或昵称上，不要点击，然后按 F8。下一步会校准右键菜单里的发送消息或发起私信。" 180
   $mainFrame = Get-MainQQWindow
   $script:MainHandleValue = $mainFrame.HandleValue
   $script:LastGroupLikeShot = Save-Shot $mainFrame "calibrate-03-search-result-before-context-menu.png"
   [void]$shots.Add($script:LastGroupLikeShot)
-  $calibrationSnapshot = [pscustomobject]@{
-    main = [pscustomobject]@{
-      left = $mainFrame.Left
-      top = $mainFrame.Top
-      width = $mainFrame.Width
-      height = $mainFrame.Height
-    }
-    points = [pscustomobject]$points
-  }
-  $privateOpened = Open-SearchResultPrivateChat $mainFrame $SearchResultBaseY $calibrationSnapshot "calibrate"
+  $resultPoint = Get-CalibratedPoint ([pscustomobject]@{ points = [pscustomobject]$points }) "searchResultFirst" $mainFrame
+  [System.Windows.Forms.MessageBox]::Show("点确定后会右键第一条搜索结果。右键菜单出现后，把鼠标移到发送消息或发起私信菜单项上，按 F8 记录并点击。按 ESC 可取消。", "新人欢迎校准 4/5", "OK", "Information") | Out-Null
+  Write-TraceStage ("calibrate-right-click-search-result x=" + $resultPoint.X + " y=" + $resultPoint.Y)
+  RightClick-At $resultPoint.X $resultPoint.Y
+  $mainFrame = Get-MainQQWindow
+  $script:MainHandleValue = $mainFrame.HandleValue
+  [void]$shots.Add((Save-Shot $mainFrame "calibrate-04-context-menu-before-capture.png"))
+  $points.contextMenuSendMessage = Wait-CalibratedCursorPointSilent $mainFrame "contextMenuSendMessage" "main" 180
+  $contextMenuSendX = [int]$points.contextMenuSendMessage["x"]
+  $contextMenuSendY = [int]$points.contextMenuSendMessage["y"]
+  Write-TraceStage ("calibrate-click-context-menu-send-message x=" + $contextMenuSendX + " y=" + $contextMenuSendY)
+  Click-At $contextMenuSendX $contextMenuSendY
+  $privateOpened = Wait-ForPrivateChatQuick 30000 "calibrate-context-menu-send-message"
   if (-not $privateOpened) {
-    [System.Windows.Forms.MessageBox]::Show("没有通过右键菜单自动进入私聊。请手动右键第一条搜索结果，选择发送消息，进入私聊窗口后点这里的确定继续校准。", "新人欢迎校准", "OK", "Information") | Out-Null
+    [System.Windows.Forms.MessageBox]::Show("没有进入私聊。请手动右键第一条搜索结果，选择发送消息或发起私信，进入私聊窗口后点这里的确定继续校准。", "新人欢迎校准", "OK", "Information") | Out-Null
     $privateOpened = Wait-ForPrivateChatQuick 30000 "calibrate-manual-private-chat"
     if (-not $privateOpened) {
       throw "private chat was not opened during calibration"
@@ -1186,7 +1217,7 @@ function Invoke-Calibration {
   $script:MainHandleValue = $mainFrame.HandleValue
   Focus-Maximized $mainFrame.Handle
   [void]$shots.Add((Save-Shot $mainFrame "calibrate-04-private-chat.png"))
-  $points.privateChatInput = Wait-CalibratedCursorPoint $mainFrame "privateChatInput" "main" "4/4 私聊输入框" "把鼠标放到底部私聊输入框里，不要点击，然后按 F8。" 180
+  $points.privateChatInput = Wait-CalibratedCursorPoint $mainFrame "privateChatInput" "main" "5/5 私聊输入框" "把鼠标放到底部私聊输入框里，不要点击，然后按 F8。" 180
 
   $payload = [ordered]@{
     version = 1
