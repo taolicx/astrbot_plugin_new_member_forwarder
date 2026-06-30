@@ -30,7 +30,7 @@ class TempSessionNotReadyError(RuntimeError):
     PLUGIN_NAME,
     "Codex",
     "管理员私聊录制新人入群资料，新人进群时自动私聊转发文字、图片和聊天记录。",
-    "1.4.35",
+    "1.4.36",
 )
 class NewMemberForwarderPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig | None = None):
@@ -43,9 +43,6 @@ class NewMemberForwarderPlugin(Star):
         self._image_buckets: dict[str, dict[str, Any]] = {}
         self._image_tasks: dict[str, asyncio.Task] = {}
         self._delivery_inflight: dict[str, int] = {}
-        self._pending_private_consumed_until: dict[str, float] = {}
-        self._qq_protocol_warmup_last_at: dict[str, float] = {}
-        self._qq_desktop_warmup_last_at: dict[str, float] = {}
         self._qq_desktop_warmup_sent_at: dict[str, float] = {}
         self._qq_human_group_warmup_last_at: dict[str, float] = {}
         self._qq_human_group_warmup_results: dict[str, dict[str, Any]] = {}
@@ -63,11 +60,11 @@ class NewMemberForwarderPlugin(Star):
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.media_dir.mkdir(parents=True, exist_ok=True)
         logger.info(
-            "new_member_forwarder: config file=%s human_warmup=%s stable_member_search=%s strict_original_forward_only=%s",
+            "new_member_forwarder: config file=%s human_warmup=%s stable_member_search=%s original_forward_only=%s",
             self.config_file,
             self._get_bool("qq_human_group_warmup_enabled", False),
             self._get_bool("qq_human_group_warmup_stable_member_search_enabled", True),
-            self._get_bool("strict_original_forward_only", True),
+            True,
         )
 
     @filter.platform_adapter_type(filter.PlatformAdapterType.AIOCQHTTP)
@@ -165,33 +162,6 @@ class NewMemberForwarderPlugin(Star):
         yield event.plain_result(f"已录入 {len(captured_items)} 条发送项，当前共 {len(session['items'])} 条。")
 
     @filter.platform_adapter_type(filter.PlatformAdapterType.AIOCQHTTP)
-    @filter.event_message_type(filter.EventMessageType.PRIVATE_MESSAGE, priority=1000)
-    async def private_pending_delivery(self, event: AstrMessageEvent):
-        if not self._get_bool("enabled", True):
-            return
-
-        sender_id = self._string(event.get_sender_id())
-        if not sender_id:
-            return
-
-        text = self._normalize_control_text(event.get_message_str())
-        if self._is_admin(sender_id) and (
-            sender_id in self._recording_sessions
-            or sender_id in self._image_reply_recording_sessions
-            or self._is_private_control_text(text)
-        ):
-            return
-
-        bot = getattr(event, "bot", None)
-        if not bot:
-            logger.warning("new_member_forwarder: pending private delivery skipped because event has no bot instance.")
-            return
-
-        if await self._try_deliver_pending_private(bot, sender_id, self._string(event.get_self_id())):
-            self._pending_private_consumed_until[sender_id] = time.time() + 10.0
-            self._stop_event(event)
-
-    @filter.platform_adapter_type(filter.PlatformAdapterType.AIOCQHTTP)
     @filter.event_message_type(filter.EventMessageType.ALL)
     async def on_new_member_notice(self, event: AstrMessageEvent):
         raw = self._raw_event(event)
@@ -237,28 +207,13 @@ class NewMemberForwarderPlugin(Star):
                 if delivery_slot_key:
                     self._mark_delivery_success(group_id, user_id)
             except Exception as exc:
-                if isinstance(exc, TempSessionNotReadyError):
-                    logger.warning(
-                        "new_member_forwarder: LLBot has not recognized user %s as a member of group %s; "
-                        "private delivery was not counted.",
-                        user_id,
-                        group_id,
-                    )
-                    if await self._queue_pending_delivery(user_id, group_id, self_id, "temp_session_not_ready"):
-                        await self._send_group_pending_notice(bot, group_id, user_id, self_id)
-                    return
-                if self._is_friend_required_error(exc):
-                    logger.warning(
-                        "new_member_forwarder: QQ refused private delivery to %s in group %s: "
-                        "temporary private session was rejected by QQ/LLBot. "
-                        "Original forward card was not rebuilt, and this delivery was not counted.",
-                        user_id,
-                        group_id,
-                    )
-                    if await self._queue_pending_delivery(user_id, group_id, self_id, "temp_session_rejected"):
-                        await self._send_group_pending_notice(bot, group_id, user_id, self_id)
-                else:
-                    logger.exception("new_member_forwarder: failed to deliver welcome material: %s", exc)
+                logger.exception(
+                    "new_member_forwarder: human warmup or recorded material delivery failed for user %s in group %s; "
+                    "delivery was not counted: %s",
+                    user_id,
+                    group_id,
+                    self._short_error(exc),
+                )
         finally:
             if delivery_slot_key:
                 self._release_delivery_slot(delivery_slot_key)
@@ -312,6 +267,8 @@ class NewMemberForwarderPlugin(Star):
     async def _run_test_delivery(self, event: AstrMessageEvent, target_qq: str = "", source_group_id: str = "") -> str:
         user_id = self._string(target_qq or event.get_sender_id())
         group_id = self._string(source_group_id or event.get_group_id())
+        if not user_id.isdigit() or not group_id.isdigit():
+            return "用法：/新人欢迎测试 QQ号 来源群号"
         payload = self._load_recorded_payload()
         items = payload.get("items") or []
         if not items:
@@ -325,23 +282,8 @@ class NewMemberForwarderPlugin(Star):
         try:
             await self._deliver_private_with_retries(bot, user_id, items, event.get_self_id(), group_id)
         except Exception as exc:
-            if isinstance(exc, TempSessionNotReadyError):
-                return (
-                    f"测试发送失败：LLBot 当前没有在群 {group_id or '未知'} 的成员列表里确认 QQ {user_id}。\n"
-                    "处理：确认这是机器人所在的来源群，或等 QQ/LLBot 群成员同步后再测。"
-                )
-            if self._is_friend_required_error(exc):
-                logger.warning(
-                    "new_member_forwarder: QQ refused test private delivery to %s from group %s: temporary private session rejected.",
-                    user_id,
-                    group_id,
-                )
-                return (
-                    f"测试发送失败：QQ/LLBot 拒绝给 QQ {user_id} 发群临时私聊。\n"
-                    "处理：确认命令里带的是机器人和对方共同所在的来源群号，并确认对方允许群临时会话。"
-                )
             logger.exception("new_member_forwarder: test delivery failed: %s", exc)
-            return f"测试发送失败：{exc}"
+            return f"测试发送失败：{self._short_error(exc, 220)}"
         finally:
             self._test_delivery_running_until = time.time() + 5.0
 
@@ -355,39 +297,18 @@ class NewMemberForwarderPlugin(Star):
 
         user_id = self._string(target_qq or event.get_sender_id())
         group_id = self._string(source_group_id or event.get_group_id())
-        text = self._string(self._get("forward_warmup_message_text", "欢迎进群")).strip()
-        if not text:
-            yield event.plain_result("开路消息为空，请先在后台设置 forward_warmup_message_text。")
-            return
         if not user_id.isdigit() or not group_id.isdigit():
             yield event.plain_result("用法：/新人欢迎开路测试 QQ号 来源群号")
             return
 
-        bot = getattr(event, "bot", None)
-        if not bot:
-            yield event.plain_result("当前事件没有 OneBot bot 实例，无法测试发送。")
+        ok = await self._send_qq_human_group_warmup_message(group_id, user_id, force=True)
+        if ok:
+            yield event.plain_result(f"真人开路已执行：QQ {user_id}，来源群 {group_id}。")
             return
-
-        self_id = self._string(event.get_self_id())
-        try:
-            await self._wait_private_context_ready(bot, group_id, user_id, self_id)
-            await self._send_plain_warmup_message_with_retries(bot, user_id, self_id, group_id)
-        except Exception as exc:
-            if isinstance(exc, TempSessionNotReadyError):
-                yield event.plain_result(
-                    f"开路消息失败：LLBot 当前没有在群 {group_id} 的成员列表里确认 QQ {user_id}。"
-                )
-                return
-            if self._is_friend_required_error(exc):
-                yield event.plain_result(
-                    f"开路消息失败：QQ/LLBot 拒绝给 QQ {user_id} 发群临时私聊。"
-                )
-                return
-            logger.exception("new_member_forwarder: warmup-only test failed: %s", exc)
-            yield event.plain_result(f"开路消息失败：{self._short_error(exc)}")
-            return
-
-        yield event.plain_result(f"已发送开路消息给 QQ {user_id}，来源群 {group_id}。")
+        result = self._qq_human_group_warmup_results.get(f"{group_id}:{user_id}") or {}
+        reason = self._string(result.get("reason")) or "unknown"
+        stage = self._string(result.get("stage")) or "-"
+        yield event.plain_result(f"真人开路未成功执行：stage={stage}，reason={reason}")
 
     @filter.platform_adapter_type(filter.PlatformAdapterType.AIOCQHTTP)
     @filter.command("新人欢迎真人开路测试")
@@ -400,12 +321,6 @@ class NewMemberForwarderPlugin(Star):
         if not self._can_run_admin_or_self_command(event):
             return
 
-        if not self._get_bool("qq_human_group_warmup_enabled", False):
-            yield event.plain_result(
-                "真人开路已关闭：当前不会执行 QQ 桌面自动化。请用 /新人欢迎测试 QQ号 来源群号 测试 API 私聊转发。"
-            )
-            return
-
         user_id = self._string(target_qq or event.get_sender_id())
         group_id = self._string(source_group_id or event.get_group_id())
         text = self._string(self._get("forward_warmup_message_text", "欢迎进群")).strip()
@@ -416,36 +331,9 @@ class NewMemberForwarderPlugin(Star):
             yield event.plain_result("用法：/新人欢迎真人开路测试 QQ号 来源群号")
             return
 
-        bot = getattr(event, "bot", None)
-        if not bot:
-            yield event.plain_result("当前事件没有 OneBot bot 实例，无法读取群/成员信息。")
-            return
-
-        self_id = self._string(event.get_self_id())
-        member_name = ""
-        try:
-            member_info = await bot.call_action(
-                "get_group_member_info",
-                group_id=int(group_id),
-                user_id=int(user_id),
-                no_cache=True,
-                **self._routing_kwargs(self_id),
-            )
-            member_name = self._member_display_name(member_info)
-        except Exception as exc:
-            logger.warning(
-                "new_member_forwarder: human warmup test cannot read member info for user %s in group %s: %s",
-                user_id,
-                group_id,
-                self._short_error(exc),
-            )
-        group_name = await self._get_group_display_name(bot, group_id, self_id)
-
         ok = await self._send_qq_human_group_warmup_message(
             group_id,
             user_id,
-            member_name,
-            group_name,
             force=True,
         )
         if ok:
@@ -455,51 +343,6 @@ class NewMemberForwarderPlugin(Star):
             reason = self._string(result.get("reason")) or "unknown"
             stage = self._string(result.get("stage")) or "-"
             yield event.plain_result(f"真人开路未成功执行：stage={stage}，reason={reason}")
-
-    @filter.platform_adapter_type(filter.PlatformAdapterType.AIOCQHTTP)
-    @filter.command("新人欢迎诊断")
-    async def diagnose_target(self, event: AstrMessageEvent, target_qq: str = "", source_group_id: str = ""):
-        if not self._is_admin(self._string(event.get_sender_id())):
-            return
-
-        user_id = self._string(target_qq or event.get_sender_id())
-        group_id = self._string(source_group_id or event.get_group_id())
-        bot = getattr(event, "bot", None)
-        if not bot:
-            yield event.plain_result("当前事件没有 OneBot bot 实例，无法诊断。")
-            return
-        if not user_id.isdigit() or not group_id.isdigit():
-            yield event.plain_result("用法：/新人欢迎诊断 QQ号 来源群号")
-            return
-
-        self_id = self._string(event.get_self_id())
-        lines = [f"诊断 QQ：{user_id}", f"来源群：{group_id}"]
-
-        try:
-            member_info = await bot.call_action(
-                "get_group_member_info",
-                group_id=int(group_id),
-                user_id=int(user_id),
-                no_cache=True,
-                **self._routing_kwargs(self_id),
-            )
-            info_user_id = self._member_user_id(member_info)
-            lines.append(f"成员详情：成功{f'，返回 QQ {info_user_id}' if info_user_id else ''}")
-        except Exception as exc:
-            lines.append(f"成员详情：失败，{self._short_error(exc)}")
-
-        list_status = await self._check_group_member_list(bot, group_id, user_id, self_id)
-        if list_status is True:
-            lines.append("成员列表：已找到该 QQ")
-            lines.append("结论：LLBot 已认到群成员；如果仍发不出，就是 QQ/LLBot 临时会话发送被底层拒绝。")
-        elif list_status is False:
-            lines.append("成员列表：没有找到该 QQ")
-            lines.append("结论：LLBot 当前不认为这个 QQ 是该来源群成员，群临时私聊会被拒绝。")
-        else:
-            lines.append(f"成员列表：检查失败，{list_status}")
-            lines.append("结论：无法确认成员列表；可以先按原链路测试发送。")
-
-        yield event.plain_result("\n".join(lines))
 
     @filter.platform_adapter_type(filter.PlatformAdapterType.AIOCQHTTP)
     @filter.command("添加一图回复图片", alias={"设置一图回复图片", "录入一图回复图片"})
@@ -653,6 +496,7 @@ class NewMemberForwarderPlugin(Star):
         self_id: str = "",
         group_id: str = "",
     ) -> None:
+        raise RuntimeError("旧 API 普通文字开路链路已停用")
         text = self._string(self._get("forward_warmup_message_text", "欢迎进群")).strip()
         if not text:
             return
@@ -689,6 +533,7 @@ class NewMemberForwarderPlugin(Star):
         self_id: str = "",
         group_id: str = "",
     ) -> None:
+        raise RuntimeError("旧 API 普通文字开路链路已停用")
         retry_delays = self._get_float_list("temp_session_retry_delays_seconds", [3.0, 8.0])
         attempt = 0
         while True:
@@ -721,6 +566,7 @@ class NewMemberForwarderPlugin(Star):
         self_id: str = "",
         group_id: str = "",
     ) -> None:
+        raise RuntimeError("旧 source node 开路链路已停用")
         text = self._string(self._get("forward_warmup_message_text", "欢迎进群")).strip()
         if not text:
             return
@@ -753,6 +599,7 @@ class NewMemberForwarderPlugin(Star):
         self_id: str = "",
         group_id: str = "",
     ) -> None:
+        raise RuntimeError("旧 source node 开路链路已停用")
         retry_delays = self._get_float_list("temp_session_retry_delays_seconds", [3.0, 8.0])
         attempt = 0
         while True:
@@ -907,36 +754,7 @@ class NewMemberForwarderPlugin(Star):
         self_id: str = "",
         group_id: str = "",
     ) -> None:
-        gap = max(0.0, self._get_float("message_gap_seconds", 0.8))
-        for item in items:
-            if not isinstance(item, dict):
-                continue
-            kind = self._string(item.get("kind"))
-            if kind in {"forward_id", "forward"} and not self._forward_item_has_reference(item):
-                raise RuntimeError("recorded forward item is old format and has no source_message_id; please re-record it")
-
-        if self._should_send_warmup_message(items):
-            await self._send_plain_warmup_message(bot, user_id, self_id, group_id)
-
-        for item in items:
-            if not isinstance(item, dict):
-                continue
-            kind = self._string(item.get("kind"))
-            if kind == "message":
-                segments = self._normalize_content_segments(item.get("segments"))
-                if segments:
-                    await self._send_private_segments(
-                        bot,
-                        user_id,
-                        segments,
-                        group_id=group_id,
-                        self_id=self_id,
-                    )
-                    await asyncio.sleep(gap)
-            elif kind in {"forward_id", "forward"}:
-                if self._forward_item_has_reference(item):
-                    await self._send_recorded_forward(bot, user_id, item, self_id, group_id)
-                    await asyncio.sleep(gap)
+        await self._deliver_private_with_retries(bot, user_id, items, self_id, group_id)
 
     async def _deliver_private_with_retries(
         self,
@@ -945,65 +763,34 @@ class NewMemberForwarderPlugin(Star):
         items: list[dict[str, Any]],
         self_id: str = "",
         group_id: str = "",
-        *,
-        skip_warmup: bool = False,
     ) -> None:
         gap = max(0.0, self._get_float("message_gap_seconds", 0.8))
         for item in items:
             if not isinstance(item, dict):
                 continue
             kind = self._string(item.get("kind"))
-            if kind in {"forward_id", "forward"} and not self._forward_item_has_reference(item):
-                raise RuntimeError("recorded forward item is old format and has no source_message_id; please re-record it")
+            if kind in {"forward_id", "forward"} and not self._forward_item_forward_id(item):
+                raise RuntimeError("录制的聊天记录缺少原始转发编号，请重新录制这条聊天记录")
 
-        if self._string(group_id) and not skip_warmup:
-            await self._wait_private_context_ready(bot, group_id, user_id, self_id)
-        desktop_warmup_sent = self._recent_desktop_warmup_sent(group_id, user_id)
-        if not skip_warmup and self._should_send_warmup_message(items) and not desktop_warmup_sent:
-            try:
-                await self._send_plain_warmup_message(bot, user_id, self_id, group_id)
-            except Exception as exc:
-                logger.warning(
-                    "new_member_forwarder: warmup message failed once for user %s in group %s; "
-                    "continue to recorded material: %s",
-                    user_id,
-                    group_id or "-",
-                    self._short_error(exc),
-                )
-        elif desktop_warmup_sent:
-            delay = max(0.0, self._get_float("forward_warmup_delay_seconds", 1.0))
-            if delay:
-                await asyncio.sleep(delay)
+        group_id = self._string(group_id)
+        user_id = self._string(user_id)
+        if not group_id.isdigit():
+            raise RuntimeError("缺少来源群号，无法执行真人开路")
+        if not user_id.isdigit():
+            raise RuntimeError("目标 QQ 号无效，无法执行真人开路")
 
-        retry_delays = self._get_float_list("temp_session_retry_delays_seconds", [3.0, 8.0])
+        if not await self._send_qq_human_group_warmup_message(group_id, user_id):
+            result = self._qq_human_group_warmup_results.get(f"{group_id}:{user_id}") or {}
+            stage = self._string(result.get("stage")) or "-"
+            reason = self._string(result.get("reason")) or "真人开路未成功发送"
+            raise RuntimeError(f"真人开路失败：stage={stage}，reason={reason}")
+
         for item in items:
             if not isinstance(item, dict):
                 continue
-            attempt = 0
-            while True:
-                try:
-                    sent = await self._deliver_private_item(bot, user_id, item, self_id, group_id)
-                    if sent:
-                        await asyncio.sleep(gap)
-                    break
-                except Exception as exc:
-                    if not self._is_friend_required_error(exc) or attempt >= len(retry_delays):
-                        raise
-
-                    delay = max(0.0, retry_delays[attempt])
-                    attempt += 1
-                    logger.warning(
-                        "new_member_forwarder: temporary private session for user %s in group %s is not ready; "
-                        "retry current item %s/%s after %.1f seconds.",
-                        user_id,
-                        group_id,
-                        attempt,
-                        len(retry_delays),
-                        delay,
-                    )
-                    if delay:
-                        await asyncio.sleep(delay)
-                    await self._prepare_private_context(bot, group_id, user_id, self_id)
+            sent = await self._deliver_private_item(bot, user_id, item, self_id, group_id)
+            if sent and gap:
+                await asyncio.sleep(gap)
 
     async def _deliver_private_item(
         self,
@@ -1026,9 +813,8 @@ class NewMemberForwarderPlugin(Star):
                 )
                 return True
         elif kind in {"forward_id", "forward"}:
-            if self._forward_item_has_reference(item):
-                await self._send_recorded_forward(bot, user_id, item, self_id, group_id)
-                return True
+            await self._send_recorded_forward(bot, user_id, item, self_id, group_id)
+            return True
         return False
 
     def _forward_item_has_reference(self, item: dict[str, Any]) -> bool:
@@ -1049,37 +835,13 @@ class NewMemberForwarderPlugin(Star):
         group_id: str,
     ) -> None:
         forward_id = self._forward_item_forward_id(item)
-        if forward_id and self._get_bool("forward_segment_send_enabled", True):
-            try:
-                await self._send_original_forward(bot, user_id, forward_id, self_id, group_id)
-                logger.info(
-                    "new_member_forwarder: sent recorded original forward segment to user %s in group %s.",
-                    user_id,
-                    self._string(group_id) or "-",
-                )
-                return
-            except Exception as exc:
-                logger.warning(
-                    "new_member_forwarder: recorded original forward segment failed id=%s user=%s group=%s: %s",
-                    forward_id,
-                    user_id,
-                    self._string(group_id) or "-",
-                    self._short_error(exc),
-                )
-                if self._get_bool("strict_original_forward_only", True):
-                    raise
-
-        source_message_id = self._forward_item_source_message_id(item)
-        if not source_message_id:
-            raise RuntimeError("recorded forward item has no source_message_id; please re-record it")
-
-        await self._send_source_node_forward(
-            bot,
+        if not forward_id:
+            raise RuntimeError("录制的聊天记录缺少原始转发编号，请重新录制这条聊天记录")
+        await self._send_original_forward(bot, user_id, forward_id, self_id, group_id)
+        logger.info(
+            "new_member_forwarder: sent recorded original forward segment to user %s in group %s.",
             user_id,
-            source_message_id,
-            self_id,
-            group_id,
-            source_kind="source_message_id",
+            self._string(group_id) or "-",
         )
 
     async def _send_source_node_forward(
@@ -1092,6 +854,7 @@ class NewMemberForwarderPlugin(Star):
         *,
         source_kind: str,
     ) -> bool:
+        raise RuntimeError("旧 source node 转发链路已停用")
         if not self._string(message_id):
             return False
         values = self._id_variants(message_id)
@@ -1177,6 +940,7 @@ class NewMemberForwarderPlugin(Star):
         user_id: str,
         self_id: str = "",
     ) -> None:
+        raise TempSessionNotReadyError("旧临时会话准备链路已停用")
         retry_delays = self._get_float_list("temp_session_retry_delays_seconds", [3.0, 8.0])
         for attempt in range(len(retry_delays) + 1):
             if await self._prepare_private_context(bot, group_id, user_id, self_id):
@@ -1205,6 +969,7 @@ class NewMemberForwarderPlugin(Star):
         user_id: str,
         self_id: str = "",
     ) -> bool:
+        return False
         if not self._get_bool("prepare_temp_session_before_send", True):
             return True
         group_id = self._string(group_id)
@@ -1269,6 +1034,7 @@ class NewMemberForwarderPlugin(Star):
         return True
 
     async def _open_qq_profile_context(self, group_id: str, user_id: str) -> bool:
+        return False
         if not self._get_bool("qq_protocol_profile_warmup_enabled", False):
             return False
         group_id = self._string(group_id)
@@ -1414,6 +1180,7 @@ class NewMemberForwarderPlugin(Star):
         target_name: str = "",
         group_name: str = "",
     ) -> bool:
+        return False
         if not self._get_bool("qq_desktop_warmup_enabled", False):
             return False
         text = self._string(self._get("forward_warmup_message_text", "欢迎进群")).strip()
@@ -2214,15 +1981,14 @@ try {
         text: str,
         timeout: float,
     ) -> dict[str, Any]:
-        if self._get_bool("qq_human_group_warmup_stable_member_search_enabled", True):
-            return self._run_qq_human_group_warmup_stable_script(
-                group_id,
-                user_id,
-                target_name,
-                group_name,
-                text,
-                timeout,
-            )
+        return self._run_qq_human_group_warmup_stable_script(
+            group_id,
+            user_id,
+            target_name,
+            group_name,
+            text,
+            timeout,
+        )
         script = r"""
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName UIAutomationClient
@@ -3453,6 +3219,7 @@ Out-Result $false 'target_qq_window_or_send_button_not_found' 'wait'
         return urls
 
     async def _activate_llbot_temp_context(self, bot: Any, group_id: str, user_id: str) -> bool:
+        return False
         if not self._get_bool("llbot_debug_temp_context_enabled", True):
             return False
         group_id = self._string(group_id)
@@ -3747,30 +3514,14 @@ Out-Result $false 'target_qq_window_or_send_button_not_found' 'wait'
     ) -> Any:
         group_id = self._string(group_id)
         if group_id.isdigit():
-            try:
-                logger.info(
-                    "new_member_forwarder: %s private payload keys=%s user=%s group=%s",
-                    action,
-                    sorted([*params.keys(), "group_id"]),
-                    target_user_id,
-                    group_id,
-                )
-                return await bot.call_action(action, group_id=int(group_id), **params)
-            except Exception as exc:
-                if self._is_friend_required_error(exc):
-                    raise
-                if not allow_without_group_retry:
-                    logger.warning(
-                        "new_member_forwarder: %s with source group failed and fallback without group_id is disabled: %s",
-                        action,
-                        self._short_error(exc),
-                    )
-                    raise
-                logger.info(
-                    "new_member_forwarder: %s with source group failed; retrying without group_id: %s",
-                    action,
-                    exc,
-                )
+            logger.info(
+                "new_member_forwarder: %s private payload keys=%s user=%s group=%s",
+                action,
+                sorted([*params.keys(), "group_id"]),
+                target_user_id,
+                group_id,
+            )
+            return await bot.call_action(action, group_id=int(group_id), **params)
         logger.info(
             "new_member_forwarder: %s private payload keys=%s user=%s group=-",
             action,
@@ -4178,6 +3929,7 @@ Out-Result $false 'target_qq_window_or_send_button_not_found' 'wait'
         self_id: str = "",
         reason: str = "",
     ) -> bool:
+        return False
         if not self._get_bool("pending_delivery_enabled", True):
             return False
         user_id = self._string(user_id)
@@ -4212,6 +3964,7 @@ Out-Result $false 'target_qq_window_or_send_button_not_found' 'wait'
         return True
 
     async def _try_deliver_pending_private(self, bot: Any, user_id: str, self_id: str = "") -> bool:
+        return False
         if not self._get_bool("pending_delivery_enabled", True):
             return False
         user_id = self._string(user_id)
@@ -4284,6 +4037,7 @@ Out-Result $false 'target_qq_window_or_send_button_not_found' 'wait'
         user_id: str,
         self_id: str = "",
     ) -> bool:
+        return False
         if not self._get_bool("pending_delivery_notice_enabled", True):
             return False
         group_id = self._string(group_id)
@@ -4400,11 +4154,7 @@ Out-Result $false 'target_qq_window_or_send_button_not_found' 'wait'
         return changed
 
     def _is_pending_private_consumed(self, user_id: str) -> bool:
-        now = time.time()
-        for key, until in list(self._pending_private_consumed_until.items()):
-            if until <= now:
-                self._pending_private_consumed_until.pop(key, None)
-        return self._pending_private_consumed_until.get(user_id, 0.0) > now
+        return False
 
     def _stop_event(self, event: AstrMessageEvent) -> None:
         stopper = getattr(event, "stop_event", None)
@@ -4417,7 +4167,7 @@ Out-Result $false 'target_qq_window_or_send_button_not_found' 'wait'
 
     def _delivery_history_key(self, group_id: str, user_id: str) -> str:
         scope = self._string(self._get("delivery_limit_scope", "user")).lower()
-        if scope in {"user_group", "group_user", "group", "群", "按群"}:
+        if scope in {"user_group", "group_user", "group", "群", "按群", "按群分别统计", "按qq和群分别统计", "按qq+群分别统计"}:
             return f"{group_id}:{user_id}"
         return user_id
 
