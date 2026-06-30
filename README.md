@@ -97,6 +97,7 @@ AstrBot/data/plugins/astrbot_plugin_new_member_forwarder
 - `qq_human_group_warmup_member_search_enabled`：找不到新人时是否尝试在群窗口搜索新人昵称或 QQ。
 - `qq_human_group_warmup_group_search_enabled`：找不到来源群窗口时是否尝试聚焦 QQ 并搜索来源群。
 - `qq_human_group_warmup_force_open_group_protocol_enabled`：是否强制使用 QQ 协议拉群；当前 PC QQ 弹“不支持本功能”时必须保持关闭。
+- `qq_human_group_warmup_deep_hint_enabled`：是否深度扫描 QQ 窗口文字；默认关闭，只有标题/搜索路径找不到目标时再手动打开。
 - `pending_delivery_enabled`：入群时临时私聊被拒绝后，是否挂起发送，等新人先私聊机器人后自动补发资料。
 - `pending_expire_seconds`：挂起补发记录保留秒数；默认 `86400`。
 - `pending_delivery_notice_enabled`：挂起补发时是否在群里提醒新人先私聊机器人。

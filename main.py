@@ -30,7 +30,7 @@ class TempSessionNotReadyError(RuntimeError):
     PLUGIN_NAME,
     "Codex",
     "管理员私聊录制新人入群资料，新人进群时自动私聊转发文字、图片和聊天记录。",
-    "1.4.25",
+    "1.4.26",
 )
 class NewMemberForwarderPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig | None = None):
@@ -1297,6 +1297,20 @@ class NewMemberForwarderPlugin(Star):
                 text,
                 timeout,
             )
+        except subprocess.TimeoutExpired as exc:
+            self._qq_human_group_warmup_results[key] = {
+                "ok": False,
+                "stage": "timeout",
+                "reason": f"powershell_timeout_after_{timeout:.1f}s",
+            }
+            logger.warning(
+                "new_member_forwarder: human QQ group warmup timed out for user %s in group %s after %.1fs: %s",
+                user_id,
+                group_id,
+                timeout,
+                self._short_error(exc),
+            )
+            return False
         except Exception as exc:
             self._qq_human_group_warmup_results[key] = {
                 "ok": False,
@@ -1478,6 +1492,22 @@ function Is-True([string]$value) {
   return @('1','true','yes','on') -contains $v
 }
 
+function Write-Stage([string]$stage) {
+  try {
+    if ($env:NMF_TRACE_FILE) {
+      Add-Content -LiteralPath $env:NMF_TRACE_FILE -Value $stage -Encoding UTF8
+    }
+  } catch {}
+}
+
+function Get-ControlViewCondition {
+  try {
+    $condition = [System.Windows.Automation.Automation]::ControlViewCondition
+    if ($condition -ne $null) { return $condition }
+  } catch {}
+  return [System.Windows.Automation.Condition]::TrueCondition
+}
+
 function Press-Key([byte]$vk) {
   [NmfHumanWin32]::keybd_event($vk, 0, 0, [UIntPtr]::Zero)
   Start-Sleep -Milliseconds 55
@@ -1556,7 +1586,8 @@ function Element-Has-Hint($element, [string[]]$hints) {
       if ($text.Contains($hint)) { return $true }
     }
     if (-not (Is-True $env:NMF_DEEP_HINT)) { return $false }
-    $all = $element.FindAll([System.Windows.Automation.TreeScope]::Descendants, [System.Windows.Automation.Condition]::TrueCondition)
+    Write-Stage 'deep_hint_scan'
+    $all = $element.FindAll([System.Windows.Automation.TreeScope]::Descendants, (Get-ControlViewCondition))
     foreach ($item in $all) {
       $name = Get-ElementTextBundle $item
       if (-not $name) { continue }
@@ -1677,7 +1708,8 @@ function Focus-FirstQQWindow {
 
 function Find-SearchEdit($root) {
   try {
-    $all = $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, [System.Windows.Automation.Condition]::TrueCondition)
+    Write-Stage 'scan_search_edit'
+    $all = $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, (Get-ControlViewCondition))
     $best = $null
     $bestScore = -1
     foreach ($item in $all) {
@@ -1706,7 +1738,8 @@ function Find-SearchEdit($root) {
 
 function Find-NamedButton($root, [string]$regex) {
   try {
-    $all = $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, [System.Windows.Automation.Condition]::TrueCondition)
+    Write-Stage 'scan_named_button'
+    $all = $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, (Get-ControlViewCondition))
     foreach ($item in $all) {
       $name = Get-ElementName $item
       if (-not $name) { continue }
@@ -1816,7 +1849,15 @@ function Find-TargetElement($root, [string[]]$targetHints) {
   $best = $null
   $bestScore = -1000
   try {
-    $all = $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, [System.Windows.Automation.Condition]::TrueCondition)
+    foreach ($hint in $validHints) {
+      try {
+        $cond = New-Object System.Windows.Automation.PropertyCondition -ArgumentList ([System.Windows.Automation.AutomationElement]::NameProperty, $hint)
+        $direct = $root.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $cond)
+        if ($direct -ne $null) { return $direct }
+      } catch {}
+    }
+    Write-Stage 'scan_target_controls'
+    $all = $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, (Get-ControlViewCondition))
     foreach ($item in $all) {
       $text = Get-ElementTextBundle $item
       if (-not $text) { continue }
@@ -1858,7 +1899,8 @@ function Try-SearchTargetInGroup($groupWin, [string]$targetName, [string]$target
 
 function Find-SendButton($root, [string]$buttonRegex) {
   try {
-    $all = $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, [System.Windows.Automation.Condition]::TrueCondition)
+    Write-Stage 'scan_send_button'
+    $all = $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, (Get-ControlViewCondition))
     foreach ($item in $all) {
       $name = Get-ElementName $item
       if (-not $name) { continue }
@@ -1910,24 +1952,30 @@ try { $waitSeconds = [double]$env:NMF_WAIT_SECONDS } catch {}
 $groupHints = @($groupName, $groupId)
 $targetHints = @($targetUserId, $targetName)
 
+Write-Stage 'startup'
 if ((Get-QQProcessCount) -le 0) {
   Out-Result $false 'qq_process_not_found' 'startup'
   exit 0
 }
+Write-Stage 'focus_first_qq'
 if (-not (Focus-FirstQQWindow)) {
   Out-Result $false 'visible_qq_window_not_found' 'startup'
   exit 0
 }
+Write-Stage 'close_unsupported_dialog'
 Close-UnsupportedQQDialog | Out-Null
 
+Write-Stage 'open_group_protocol'
 Open-GroupByProtocol $groupId
 $deadline = (Get-Date).AddSeconds($waitSeconds)
 $groupWin = $null
 $searchedGroup = $false
 while ((Get-Date) -lt $deadline -and $groupWin -eq $null) {
+  Write-Stage 'find_group_loop'
   Close-UnsupportedQQDialog | Out-Null
   $groupWin = Find-GroupWindow $groupHints $requireGroupHint
   if ($groupWin -eq $null -and -not $searchedGroup) {
+    Write-Stage 'group_search'
     $searchedGroup = Try-OpenGroupFromQQSearch $groupHints $requireGroupHint
   }
   if ($groupWin -eq $null) { Start-Sleep -Milliseconds 450 }
@@ -1937,13 +1985,22 @@ if ($groupWin -eq $null) {
   exit 0
 }
 
+Write-Stage 'group_found'
 Focus-Window $groupWin | Out-Null
 $searched = $false
+if (Is-True $env:NMF_MEMBER_SEARCH) {
+  Write-Stage 'member_search_initial'
+  $searched = Try-SearchTargetInGroup $groupWin $targetName $targetUserId
+}
 while ((Get-Date) -lt $deadline) {
+  Write-Stage 'find_target_loop'
   $target = Find-TargetElement $groupWin $targetHints
   if ($target -ne $null) {
+    Write-Stage 'target_found'
     if (Click-NearLeftOfElement $target) {
+      Write-Stage 'click_avatar_area'
       if (Try-ClickSendMessageButton $targetHints $buttonRegex $requireTargetHint) {
+        Write-Stage 'paste_after_avatar_button'
         if (Paste-And-Enter $text) {
           Out-Result $true 'sent_after_group_member_avatar_area_button' 'send_button'
           exit 0
@@ -1951,8 +2008,10 @@ while ((Get-Date) -lt $deadline) {
       }
     }
     if (Invoke-Element $target $false) {
+      Write-Stage 'click_target'
       Start-Sleep -Milliseconds 950
       if (Try-ClickSendMessageButton $targetHints $buttonRegex $requireTargetHint) {
+        Write-Stage 'paste_after_profile_button'
         if (Paste-And-Enter $text) {
           Out-Result $true 'sent_after_group_member_profile_button' 'send_button'
           exit 0
@@ -1960,8 +2019,10 @@ while ((Get-Date) -lt $deadline) {
       }
     }
     if (Invoke-Element $target $true) {
+      Write-Stage 'double_click_target'
       Start-Sleep -Milliseconds 1200
       if (Try-ClickSendMessageButton $targetHints $buttonRegex $requireTargetHint) {
+        Write-Stage 'paste_after_double_click_button'
         if (Paste-And-Enter $text) {
           Out-Result $true 'sent_after_group_member_double_click_button' 'send_button'
           exit 0
@@ -1974,6 +2035,7 @@ while ((Get-Date) -lt $deadline) {
     }
   }
   if (-not $searched) {
+    Write-Stage 'member_search_retry'
     $searched = Try-SearchTargetInGroup $groupWin $targetName $targetUserId
   }
   Start-Sleep -Milliseconds 650
@@ -1981,6 +2043,13 @@ while ((Get-Date) -lt $deadline) {
 
 Out-Result $false 'target_member_or_send_message_button_not_found' 'target'
 """
+        runtime_dir = self.data_dir / "runtime_scripts"
+        trace_path = runtime_dir / f"human_group_warmup_{group_id}_{user_id}_{int(time.time() * 1000)}.trace.log"
+        try:
+            runtime_dir.mkdir(parents=True, exist_ok=True)
+            trace_path.write_text("", encoding="utf-8")
+        except Exception:
+            pass
         env = os.environ.copy()
         env.update(
             {
@@ -2006,8 +2075,9 @@ Out-Result $false 'target_member_or_send_message_button_not_found' 'target'
                 if self._get_bool("qq_human_group_warmup_force_open_group_protocol_enabled", False)
                 else "0",
                 "NMF_DEEP_HINT": "1"
-                if self._get_bool("qq_human_group_warmup_deep_hint_enabled", True)
+                if self._get_bool("qq_human_group_warmup_deep_hint_enabled", False)
                 else "0",
+                "NMF_TRACE_FILE": str(trace_path),
                 "NMF_BUTTON_REGEX": self._string(
                     self._get(
                         "qq_human_group_warmup_button_regex",
@@ -2016,12 +2086,20 @@ Out-Result $false 'target_member_or_send_message_button_not_found' 'target'
                 ),
             }
         )
-        completed = self._run_powershell_sta_script_file(
-            script,
-            env,
-            timeout,
-            "human_group_warmup.ps1",
-        )
+        try:
+            completed = self._run_powershell_sta_script_file(
+                script,
+                env,
+                timeout,
+                "human_group_warmup.ps1",
+            )
+        except subprocess.TimeoutExpired:
+            stage = self._read_runtime_trace_tail(trace_path) or "timeout"
+            return {
+                "ok": False,
+                "stage": stage,
+                "reason": f"powershell_timeout_after_{timeout:.1f}s",
+            }
         stdout = (completed.stdout or "").strip()
         stderr = (completed.stderr or "").strip()
         last_line = stdout.splitlines()[-1].strip() if stdout else ""
@@ -2042,6 +2120,15 @@ Out-Result $false 'target_member_or_send_message_button_not_found' 'target'
             ),
             "returncode": completed.returncode,
         }
+
+    def _read_runtime_trace_tail(self, trace_path: Path) -> str:
+        try:
+            if not trace_path.exists():
+                return ""
+            lines = trace_path.read_text(encoding="utf-8", errors="replace").splitlines()
+            return lines[-1].strip() if lines else ""
+        except Exception:
+            return ""
 
     def _run_qq_desktop_warmup_script(
         self,

@@ -122,7 +122,7 @@
   "qq_human_group_warmup_deep_hint_enabled": {
     "type": "bool",
     "description": "深度扫描 QQ 窗口文字来识别群和新人线索；更安全但可能稍慢。",
-    "default": true
+    "default": false
   },
   "qq_human_group_warmup_button_regex": {
     "type": "string",
