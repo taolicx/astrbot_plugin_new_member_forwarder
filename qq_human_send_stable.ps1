@@ -795,15 +795,26 @@ function Assert-PrivateChat($Frame, [string]$ShotPath, [string]$ExpectedQQ) {
   }
   if ($ShotPath) {
     try {
-      $ocrText = ((Read-ImageText $ShotPath) + "") -replace "\s+", ""
       $groupHints = @("群成员", "群公告", "群主", "管理员")
-      foreach ($hint in $groupHints) {
-        if ($ocrText -like "*$hint*") {
-          throw ("private chat guard refused to send; group page OCR hint=" + $hint)
+      $rightPanelMinX = [Math]::Max(0, $Frame.Width - 500)
+      $rightPanelMaxX = $Frame.Width + 8
+      $rightPanelTop = 75
+      $rightPanelBottom = [Math]::Max($rightPanelTop + 120, $Frame.Height - 130)
+      foreach ($line in @(Read-ImageOcrLines $ShotPath)) {
+        $text = (($line.Text + "") -replace "\s+", "")
+        if (-not $text) { continue }
+        $centerX = [double]$line.Left + ([double]$line.Width / 2.0)
+        $centerY = [double]$line.Top + ([double]$line.Height / 2.0)
+        $inRightPanel = [bool]($centerX -ge $rightPanelMinX -and $centerX -le $rightPanelMaxX -and $centerY -ge $rightPanelTop -and $centerY -le $rightPanelBottom)
+        if (-not $inRightPanel) { continue }
+        foreach ($hint in $groupHints) {
+          if ($text -like "*$hint*") {
+            throw ("private chat guard refused to send; group page right-panel OCR hint=" + $hint)
+          }
         }
-      }
-      if ($ExpectedQQ -and $ocrText -like ("*" + $ExpectedQQ + "*")) {
-        throw ("private chat guard refused to send; target QQ still visible on possible group search page")
+        if ($ExpectedQQ -and $text -like ("*" + $ExpectedQQ + "*")) {
+          throw ("private chat guard refused to send; target QQ still visible in right panel on possible group search page")
+        }
       }
     } catch {
       if (($_.Exception.Message + "") -like "private chat guard refused*") { throw }
