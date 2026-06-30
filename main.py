@@ -30,7 +30,7 @@ class TempSessionNotReadyError(RuntimeError):
     PLUGIN_NAME,
     "Codex",
     "管理员私聊录制新人入群资料，新人进群时自动私聊转发文字、图片和聊天记录。",
-    "1.4.24",
+    "1.4.25",
 )
 class NewMemberForwarderPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig | None = None):
@@ -1704,6 +1704,39 @@ function Find-SearchEdit($root) {
   return $null
 }
 
+function Find-NamedButton($root, [string]$regex) {
+  try {
+    $all = $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, [System.Windows.Automation.Condition]::TrueCondition)
+    foreach ($item in $all) {
+      $name = Get-ElementName $item
+      if (-not $name) { continue }
+      if ($name -match $regex) { return $item }
+    }
+  } catch {}
+  return $null
+}
+
+function Close-UnsupportedQQDialog {
+  $closed = $false
+  foreach ($win in (Get-QQWindows)) {
+    $isUnsupported = Element-Has-Hint $win @('QQ版本不支持', '不支持本功能', '请尝试下载最新版本', '手机端查看')
+    if (-not $isUnsupported) { continue }
+    Focus-Window $win | Out-Null
+    $button = Find-NamedButton $win '确定|知道了|关闭|OK|Ok|ok'
+    if ($button -ne $null) {
+      if (Invoke-Element $button $false) {
+        Start-Sleep -Milliseconds 400
+        $closed = $true
+        continue
+      }
+    }
+    Press-Key 0x0D
+    Start-Sleep -Milliseconds 400
+    $closed = $true
+  }
+  return $closed
+}
+
 function Clear-And-TypeQuery([string]$query) {
   Press-CtrlKey 0x41
   Start-Sleep -Milliseconds 120
@@ -1743,7 +1776,7 @@ function Try-OpenGroupFromQQSearch([string[]]$groupHints, [bool]$requireGroupHin
 }
 
 function Open-GroupByProtocol([string]$groupId) {
-  if (-not (Is-True $env:NMF_OPEN_GROUP_PROTOCOL)) { return }
+  if (-not (Is-True $env:NMF_FORCE_OPEN_GROUP_PROTOCOL)) { return }
   foreach ($url in @(
     "mqqapi://im/chat?chat_type=group&uin=$groupId&version=1&src_type=web",
     "mqqapi://im/chat?chat_type=group&groupuin=$groupId&version=1&src_type=web"
@@ -1751,6 +1784,7 @@ function Open-GroupByProtocol([string]$groupId) {
     try {
       Start-Process $url | Out-Null
       Start-Sleep -Milliseconds 900
+      Close-UnsupportedQQDialog | Out-Null
     } catch {}
   }
 }
@@ -1884,12 +1918,14 @@ if (-not (Focus-FirstQQWindow)) {
   Out-Result $false 'visible_qq_window_not_found' 'startup'
   exit 0
 }
+Close-UnsupportedQQDialog | Out-Null
 
 Open-GroupByProtocol $groupId
 $deadline = (Get-Date).AddSeconds($waitSeconds)
 $groupWin = $null
 $searchedGroup = $false
 while ((Get-Date) -lt $deadline -and $groupWin -eq $null) {
+  Close-UnsupportedQQDialog | Out-Null
   $groupWin = Find-GroupWindow $groupHints $requireGroupHint
   if ($groupWin -eq $null -and -not $searchedGroup) {
     $searchedGroup = Try-OpenGroupFromQQSearch $groupHints $requireGroupHint
@@ -1966,8 +2002,8 @@ Out-Result $false 'target_member_or_send_message_button_not_found' 'target'
                 "NMF_GROUP_SEARCH": "1"
                 if self._get_bool("qq_human_group_warmup_group_search_enabled", True)
                 else "0",
-                "NMF_OPEN_GROUP_PROTOCOL": "1"
-                if self._get_bool("qq_human_group_warmup_open_group_protocol_enabled", True)
+                "NMF_FORCE_OPEN_GROUP_PROTOCOL": "1"
+                if self._get_bool("qq_human_group_warmup_force_open_group_protocol_enabled", False)
                 else "0",
                 "NMF_DEEP_HINT": "1"
                 if self._get_bool("qq_human_group_warmup_deep_hint_enabled", True)

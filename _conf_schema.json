@@ -111,8 +111,13 @@
   },
   "qq_human_group_warmup_open_group_protocol_enabled": {
     "type": "bool",
-    "description": "执行真人式开路前先通过 QQ 协议拉起来源群窗口；后续仍会校验群窗口线索。",
-    "default": true
+    "description": "旧版协议拉群开关，当前真人开路不再使用；保留该项只是兼容旧配置。",
+    "default": false
+  },
+  "qq_human_group_warmup_force_open_group_protocol_enabled": {
+    "type": "bool",
+    "description": "强制使用 QQ mqqapi 协议拉起来源群；如果 PC QQ 弹出“不支持本功能”，请保持关闭。",
+    "default": false
   },
   "qq_human_group_warmup_deep_hint_enabled": {
     "type": "bool",

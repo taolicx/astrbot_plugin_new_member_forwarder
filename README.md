@@ -39,6 +39,7 @@
 - 默认关闭，打开 `qq_human_group_warmup_enabled` 后才会在新人入群时执行。
 - 执行顺序是：拉起/聚焦来源群窗口，识别来源群，找新人昵称或 QQ，点击资料卡里的“发消息/聊天”，发送 `forward_warmup_message_text`。
 - 如果一开始没识别到来源群窗口，会先可见地聚焦 QQ，并尝试通过 QQ 搜索框查找来源群。
+- PC QQ 提示“不支持本功能”时，不要开启协议拉群；真人开路默认不再使用 `mqqapi://` 拉群。
 - 这一步只负责发送额外第一条开路文字；成功后仍继续走原来的原始聊天记录卡片转发链路，不拆聊天记录、不重建兜底。
 - 双 QQ 登录时建议保持 `qq_human_group_warmup_require_group_hint` 和 `qq_human_group_warmup_require_target_hint` 开启，避免点错窗口。
 
@@ -95,6 +96,7 @@ AstrBot/data/plugins/astrbot_plugin_new_member_forwarder
 - `qq_human_group_warmup_require_group_hint` / `qq_human_group_warmup_require_target_hint`：是否强制校验来源群和新人线索，双 QQ 登录建议开启。
 - `qq_human_group_warmup_member_search_enabled`：找不到新人时是否尝试在群窗口搜索新人昵称或 QQ。
 - `qq_human_group_warmup_group_search_enabled`：找不到来源群窗口时是否尝试聚焦 QQ 并搜索来源群。
+- `qq_human_group_warmup_force_open_group_protocol_enabled`：是否强制使用 QQ 协议拉群；当前 PC QQ 弹“不支持本功能”时必须保持关闭。
 - `pending_delivery_enabled`：入群时临时私聊被拒绝后，是否挂起发送，等新人先私聊机器人后自动补发资料。
 - `pending_expire_seconds`：挂起补发记录保留秒数；默认 `86400`。
 - `pending_delivery_notice_enabled`：挂起补发时是否在群里提醒新人先私聊机器人。
