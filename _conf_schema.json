@@ -111,7 +111,7 @@
   "qq_human_group_warmup_post_send_delay_seconds": {
     "type": "float",
     "description": "开路成功后等待秒数",
-    "hint": "真人开路文字发送成功后，等待多少秒再发送录制资料。",
+    "hint": "真人开路第一条文字或图片发送成功后，等待多少秒再发送录制资料。",
     "default": 1.5
   },
   "qq_human_group_warmup_cooldown_seconds": {
