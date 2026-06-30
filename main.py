@@ -31,7 +31,7 @@ class TempSessionNotReadyError(RuntimeError):
     PLUGIN_NAME,
     "Codex",
     "管理员私聊录制新人入群资料，新人进群时自动私聊转发文字、图片和聊天记录。",
-    "1.4.20",
+    "1.4.21",
 )
 class NewMemberForwarderPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig | None = None):
@@ -280,6 +280,23 @@ class NewMemberForwarderPlugin(Star):
         if message:
             self._stop_event(event)
             yield event.plain_result(message)
+
+    @filter.after_message_sent()
+    async def after_message_sent_test_delivery(self, event: AstrMessageEvent):
+        if time.time() < self._test_delivery_running_until:
+            return
+        command_args = self._parse_self_test_command(self._result_plain_text(event))
+        if command_args is None:
+            return
+
+        target_qq, source_group_id = command_args
+        message = await self._run_test_delivery(event, target_qq, source_group_id)
+        if not message:
+            return
+        try:
+            await event.send(event.plain_result(message))
+        except Exception as exc:
+            logger.exception("new_member_forwarder: failed to send after-sent test result: %s", exc)
 
     async def _run_test_delivery(self, event: AstrMessageEvent, target_qq: str = "", source_group_id: str = "") -> str:
         user_id = self._string(target_qq or event.get_sender_id())
@@ -2552,6 +2569,24 @@ Out-Result $false 'target_qq_window_or_send_button_not_found' 'wait'
         source_group_id = args[1] if len(args) >= 2 else ""
         return target_qq, source_group_id
 
+    def _result_plain_text(self, event: AstrMessageEvent) -> str:
+        result = event.get_result()
+        if result is None:
+            return ""
+        getter = getattr(result, "get_plain_text", None)
+        if callable(getter):
+            try:
+                return self._string(getter()).strip()
+            except Exception:
+                pass
+
+        parts: list[str] = []
+        for component in getattr(result, "chain", []) or []:
+            text = getattr(component, "text", None)
+            if text:
+                parts.append(self._string(text))
+        return " ".join(parts).strip()
+
     def _raw_event(self, event: AstrMessageEvent) -> dict[str, Any]:
         raw = getattr(event.message_obj, "raw_message", None)
         return raw if isinstance(raw, dict) else {}
@@ -2644,7 +2679,7 @@ Out-Result $false 'target_qq_window_or_send_button_not_found' 'wait'
 
     def _normalize_control_text(self, text: str) -> str:
         text = self._string(text)
-        for prefix in ("/", "／", "!", "！"):
+        for prefix in ("/", "／", "#", "＃", "!", "！"):
             if text.startswith(prefix):
                 text = text[len(prefix) :].strip()
         return text
