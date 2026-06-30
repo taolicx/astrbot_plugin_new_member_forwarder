@@ -39,6 +39,106 @@
     "description": "发送前刷新群成员列表并确认目标 QQ 在来源群内；llbot 临时会话不稳定时建议开启。",
     "default": true
   },
+  "qq_protocol_profile_warmup_enabled": {
+    "type": "bool",
+    "description": "Before sending, open QQ profile/chat protocol links to mimic clicking the group member avatar and choosing send message.",
+    "default": false
+  },
+  "qq_protocol_profile_warmup_delay_seconds": {
+    "type": "float",
+    "description": "Seconds to wait after opening the QQ profile/chat protocol before sending the warmup message.",
+    "default": 2.0
+  },
+  "qq_protocol_profile_warmup_url_gap_seconds": {
+    "type": "float",
+    "description": "Seconds to wait between multiple QQ protocol warmup URLs.",
+    "default": 0.4
+  },
+  "qq_protocol_profile_warmup_cooldown_seconds": {
+    "type": "float",
+    "description": "Do not open QQ profile/chat protocol again for the same group member within this many seconds.",
+    "default": 30.0
+  },
+  "qq_protocol_profile_warmup_urls": {
+    "type": "list",
+    "description": "QQ protocol URL templates. Supports {user_id} and {group_id}. Leave empty to use built-in group profile/chat templates.",
+    "default": []
+  },
+  "qq_desktop_warmup_enabled": {
+    "type": "bool",
+    "description": "Use Windows desktop automation to click QQ profile/chat and send the first warmup text.",
+    "default": false
+  },
+  "qq_desktop_warmup_wait_seconds": {
+    "type": "float",
+    "description": "Seconds to wait for the target QQ profile/chat window before desktop warmup gives up.",
+    "default": 8.0
+  },
+  "qq_desktop_warmup_timeout_seconds": {
+    "type": "float",
+    "description": "Total timeout seconds for the desktop warmup helper process.",
+    "default": 18.0
+  },
+  "qq_desktop_warmup_post_send_delay_seconds": {
+    "type": "float",
+    "description": "Seconds to wait after the desktop warmup text is sent before forwarding recorded material.",
+    "default": 1.2
+  },
+  "qq_desktop_warmup_cooldown_seconds": {
+    "type": "float",
+    "description": "Do not run desktop warmup again for the same group member within this many seconds.",
+    "default": 60.0
+  },
+  "qq_desktop_warmup_sent_window_seconds": {
+    "type": "float",
+    "description": "How long a successful desktop warmup is considered fresh enough to skip API warmup.",
+    "default": 180.0
+  },
+  "qq_desktop_warmup_require_target_hint": {
+    "type": "bool",
+    "description": "Only type into a QQ window that exposes the target QQ number or nickname.",
+    "default": true
+  },
+  "qq_desktop_warmup_deep_target_hint_enabled": {
+    "type": "bool",
+    "description": "Deep-scan QQ window text to verify target hint. Safer but may be slow on QQNT.",
+    "default": true
+  },
+  "qq_desktop_warmup_direct_paste_enabled": {
+    "type": "bool",
+    "description": "If the target QQ chat is already open and no send-message button is found, paste warmup text directly.",
+    "default": true
+  },
+  "qq_desktop_warmup_click_send_button_enabled": {
+    "type": "bool",
+    "description": "Try to click Send Message/Chat button on QQ profile card before typing warmup text.",
+    "default": true
+  },
+  "qq_desktop_warmup_button_regex": {
+    "type": "string",
+    "description": "Regex used to identify the QQ profile send-message button in Windows UI Automation.",
+    "default": "\\u53d1\\u6d88\\u606f|\\u53d1\\u9001\\u6d88\\u606f|\\u804a\\u5929|\\u79c1\\u804a"
+  },
+  "llbot_debug_temp_context_enabled": {
+    "type": "bool",
+    "description": "Use LLBot llonebot_debug to activate the group temporary private chat before sending.",
+    "default": true
+  },
+  "llbot_debug_temp_input_status_enabled": {
+    "type": "bool",
+    "description": "Send a temporary-chat input-status request while activating the LLBot temporary chat.",
+    "default": true
+  },
+  "llbot_debug_temp_input_status_event_type": {
+    "type": "int",
+    "description": "Input-status event_type used by LLBot sendShowInputStatusReq for temporary chats.",
+    "default": 1
+  },
+  "llbot_debug_temp_context_delay_seconds": {
+    "type": "float",
+    "description": "Seconds to wait after LLBot temporary-chat activation before sending.",
+    "default": 0.8
+  },
   "forward_warmup_message_enabled": {
     "type": "bool",
     "description": "发送资料前是否额外发送一条普通私聊文字，用来打通群临时会话。",

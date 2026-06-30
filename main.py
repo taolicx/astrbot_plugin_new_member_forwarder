@@ -1,6 +1,9 @@
 import asyncio
+import base64
 import json
+import os
 import re
+import subprocess
 import time
 import urllib.parse
 import urllib.request
@@ -28,7 +31,7 @@ class TempSessionNotReadyError(RuntimeError):
     PLUGIN_NAME,
     "Codex",
     "管理员私聊录制新人入群资料，新人进群时自动私聊转发文字、图片和聊天记录。",
-    "1.4.12",
+    "1.4.19",
 )
 class NewMemberForwarderPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig | None = None):
@@ -42,6 +45,9 @@ class NewMemberForwarderPlugin(Star):
         self._image_tasks: dict[str, asyncio.Task] = {}
         self._delivery_inflight: dict[str, int] = {}
         self._pending_private_consumed_until: dict[str, float] = {}
+        self._qq_protocol_warmup_last_at: dict[str, float] = {}
+        self._qq_desktop_warmup_last_at: dict[str, float] = {}
+        self._qq_desktop_warmup_sent_at: dict[str, float] = {}
         self.data_dir = self._resolve_data_dir()
         self.media_dir = self.data_dir / "media"
         self.record_file = self.data_dir / "recorded_material.json"
@@ -834,7 +840,8 @@ class NewMemberForwarderPlugin(Star):
 
         if self._string(group_id):
             await self._wait_private_context_ready(bot, group_id, user_id, self_id)
-        if not skip_warmup and self._should_send_warmup_message(items):
+        desktop_warmup_sent = self._recent_desktop_warmup_sent(group_id, user_id)
+        if not skip_warmup and self._should_send_warmup_message(items) and not desktop_warmup_sent:
             try:
                 await self._send_plain_warmup_message(bot, user_id, self_id, group_id)
             except Exception as exc:
@@ -845,6 +852,10 @@ class NewMemberForwarderPlugin(Star):
                     group_id or "-",
                     self._short_error(exc),
                 )
+        elif desktop_warmup_sent:
+            delay = max(0.0, self._get_float("forward_warmup_delay_seconds", 1.0))
+            if delay:
+                await asyncio.sleep(delay)
 
         retry_delays = self._get_float_list("temp_session_retry_delays_seconds", [3.0, 8.0])
         for item in items:
@@ -1057,8 +1068,9 @@ class NewMemberForwarderPlugin(Star):
         user_id = self._string(user_id)
         if not group_id.isdigit() or not user_id.isdigit():
             return True
+        member_info: Any = None
         try:
-            await bot.call_action(
+            member_info = await bot.call_action(
                 "get_group_member_info",
                 group_id=int(group_id),
                 user_id=int(user_id),
@@ -1077,7 +1089,521 @@ class NewMemberForwarderPlugin(Star):
         list_status = await self._check_group_member_list(bot, group_id, user_id, self_id)
         if list_status is False:
             return False
+        llbot_activated = await self._activate_llbot_temp_context(bot, group_id, user_id)
+        opened = await self._open_qq_profile_context(group_id, user_id)
+        if llbot_activated or opened:
+            await self._send_qq_desktop_warmup_message(
+                group_id,
+                user_id,
+                self._member_display_name(member_info),
+            )
         return True
+
+    async def _open_qq_profile_context(self, group_id: str, user_id: str) -> bool:
+        if not self._get_bool("qq_protocol_profile_warmup_enabled", False):
+            return False
+        group_id = self._string(group_id)
+        user_id = self._string(user_id)
+        if not group_id.isdigit() or not user_id.isdigit():
+            return False
+
+        now = time.time()
+        key = f"{group_id}:{user_id}"
+        cooldown = max(0.0, self._get_float("qq_protocol_profile_warmup_cooldown_seconds", 30.0))
+        last_at = self._qq_protocol_warmup_last_at.get(key, 0.0)
+        if cooldown and now - last_at < cooldown:
+            return False
+        self._qq_protocol_warmup_last_at[key] = now
+
+        urls = self._qq_protocol_profile_warmup_urls(group_id, user_id)
+        if not urls:
+            return False
+
+        opened = False
+        for url in urls:
+            try:
+                await asyncio.to_thread(os.startfile, url)  # type: ignore[attr-defined]
+                opened = True
+                logger.info(
+                    "new_member_forwarder: opened QQ profile/chat protocol for user %s in group %s: %s",
+                    user_id,
+                    group_id,
+                    url,
+                )
+                gap = max(0.0, self._get_float("qq_protocol_profile_warmup_url_gap_seconds", 0.4))
+                if gap:
+                    await asyncio.sleep(gap)
+            except Exception as exc:
+                logger.warning(
+                    "new_member_forwarder: failed to open QQ profile/chat protocol for user %s in group %s: %s",
+                    user_id,
+                    group_id,
+                    self._short_error(exc),
+                )
+
+        delay = max(0.0, self._get_float("qq_protocol_profile_warmup_delay_seconds", 2.0))
+        if opened and delay:
+            await asyncio.sleep(delay)
+        return opened
+
+    async def _send_qq_desktop_warmup_message(
+        self,
+        group_id: str,
+        user_id: str,
+        target_name: str = "",
+    ) -> bool:
+        if not self._get_bool("qq_desktop_warmup_enabled", False):
+            return False
+        text = self._string(self._get("forward_warmup_message_text", "欢迎进群")).strip()
+        if not text:
+            return False
+        group_id = self._string(group_id)
+        user_id = self._string(user_id)
+        if not group_id.isdigit() or not user_id.isdigit():
+            return False
+
+        now = time.time()
+        key = f"{group_id}:{user_id}"
+        cooldown = max(0.0, self._get_float("qq_desktop_warmup_cooldown_seconds", 60.0))
+        last_at = self._qq_desktop_warmup_last_at.get(key, 0.0)
+        if cooldown and now - last_at < cooldown:
+            return self._recent_desktop_warmup_sent(group_id, user_id)
+        self._qq_desktop_warmup_last_at[key] = now
+
+        timeout = max(3.0, self._get_float("qq_desktop_warmup_timeout_seconds", 18.0))
+        try:
+            result = await asyncio.to_thread(
+                self._run_qq_desktop_warmup_script,
+                group_id,
+                user_id,
+                target_name,
+                text,
+                timeout,
+            )
+        except Exception as exc:
+            logger.warning(
+                "new_member_forwarder: QQ desktop warmup failed for user %s in group %s: %s",
+                user_id,
+                group_id,
+                self._short_error(exc),
+            )
+            return False
+
+        if result.get("ok"):
+            self._qq_desktop_warmup_sent_at[key] = time.time()
+            logger.info(
+                "new_member_forwarder: sent QQ desktop warmup for user %s in group %s: %s",
+                user_id,
+                group_id,
+                result.get("reason") or "ok",
+            )
+            post_delay = max(0.0, self._get_float("qq_desktop_warmup_post_send_delay_seconds", 1.2))
+            if post_delay:
+                await asyncio.sleep(post_delay)
+            return True
+
+        logger.warning(
+            "new_member_forwarder: QQ desktop warmup did not send for user %s in group %s: %s",
+            user_id,
+            group_id,
+            result.get("reason") or result,
+        )
+        return False
+
+    def _recent_desktop_warmup_sent(self, group_id: str, user_id: str) -> bool:
+        group_id = self._string(group_id)
+        user_id = self._string(user_id)
+        if not group_id or not user_id:
+            return False
+        key = f"{group_id}:{user_id}"
+        last_at = self._qq_desktop_warmup_sent_at.get(key, 0.0)
+        window = max(3.0, self._get_float("qq_desktop_warmup_sent_window_seconds", 180.0))
+        return bool(last_at and time.time() - last_at <= window)
+
+    def _run_qq_desktop_warmup_script(
+        self,
+        group_id: str,
+        user_id: str,
+        target_name: str,
+        text: str,
+        timeout: float,
+    ) -> dict[str, Any]:
+        script = r"""
+$ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName UIAutomationClient
+Add-Type -AssemblyName UIAutomationTypes
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+public class NmfWin32 {
+  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
+  [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern bool ShowWindowAsync(IntPtr hWnd, int nCmdShow);
+  [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
+  [DllImport("user32.dll")] public static extern void mouse_event(uint flags, uint dx, uint dy, uint data, UIntPtr extra);
+  [DllImport("user32.dll")] public static extern void keybd_event(byte vk, byte scan, uint flags, UIntPtr extra);
+}
+"@
+
+function Out-Result([bool]$ok, [string]$reason, [string]$stage) {
+  @{ ok = $ok; reason = $reason; stage = $stage } | ConvertTo-Json -Compress
+}
+
+function Is-True([string]$value) {
+  $v = ($value + '').Trim().ToLowerInvariant()
+  return @('1','true','yes','on') -contains $v
+}
+
+function Press-Key([byte]$vk) {
+  [NmfWin32]::keybd_event($vk, 0, 0, [UIntPtr]::Zero)
+  Start-Sleep -Milliseconds 50
+  [NmfWin32]::keybd_event($vk, 0, 2, [UIntPtr]::Zero)
+}
+
+function Paste-And-Enter([string]$text) {
+  $oldText = $null
+  try {
+    if ([System.Windows.Forms.Clipboard]::ContainsText()) {
+      $oldText = [System.Windows.Forms.Clipboard]::GetText()
+    }
+  } catch {}
+  $set = $false
+  for ($i = 0; $i -lt 10 -and -not $set; $i++) {
+    try {
+      [System.Windows.Forms.Clipboard]::SetText($text)
+      $set = $true
+    } catch {
+      Start-Sleep -Milliseconds 120
+    }
+  }
+  if (-not $set) { return $false }
+  [NmfWin32]::keybd_event(0x11, 0, 0, [UIntPtr]::Zero)
+  Press-Key 0x56
+  [NmfWin32]::keybd_event(0x11, 0, 2, [UIntPtr]::Zero)
+  Start-Sleep -Milliseconds 220
+  Press-Key 0x0D
+  Start-Sleep -Milliseconds 220
+  if ($oldText -ne $null) {
+    try { [System.Windows.Forms.Clipboard]::SetText($oldText) } catch {}
+  }
+  return $true
+}
+
+function Invoke-Element($element) {
+  $pattern = $null
+  try {
+    if ($element.TryGetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern, [ref]$pattern)) {
+      $pattern.Invoke()
+      return $true
+    }
+  } catch {}
+  try {
+    $rect = $element.Current.BoundingRectangle
+    if ($rect.Width -gt 0 -and $rect.Height -gt 0) {
+      $x = [int]($rect.Left + $rect.Width / 2)
+      $y = [int]($rect.Top + $rect.Height / 2)
+      [NmfWin32]::SetCursorPos($x, $y) | Out-Null
+      Start-Sleep -Milliseconds 80
+      [NmfWin32]::mouse_event(2, 0, 0, 0, [UIntPtr]::Zero)
+      Start-Sleep -Milliseconds 80
+      [NmfWin32]::mouse_event(4, 0, 0, 0, [UIntPtr]::Zero)
+      return $true
+    }
+  } catch {}
+  return $false
+}
+
+function Element-Has-Hint($element, [string[]]$hints) {
+  $validHints = @($hints | Where-Object { ($_ + '').Trim().Length -gt 0 })
+  if ($validHints.Count -eq 0) { return $false }
+  try {
+    foreach ($hint in $validHints) {
+      if (($element.Current.Name + '').Contains($hint)) { return $true }
+    }
+    if (-not (Is-True $env:NMF_DEEP_TARGET_HINT)) { return $false }
+    $all = $element.FindAll([System.Windows.Automation.TreeScope]::Descendants, [System.Windows.Automation.Condition]::TrueCondition)
+    foreach ($item in $all) {
+      $name = ''
+      try { $name = $item.Current.Name + '' } catch {}
+      if (-not $name) { continue }
+      foreach ($hint in $validHints) {
+        if ($name.Contains($hint)) { return $true }
+      }
+    }
+  } catch {}
+  return $false
+}
+
+function Get-QQWindows {
+  $llbotPids = @(Get-Process llbot -ErrorAction SilentlyContinue | ForEach-Object { $_.Id })
+  $qqPids = @(Get-Process QQ -ErrorAction SilentlyContinue | ForEach-Object { $_.Id })
+  $allPids = @($llbotPids + $qqPids)
+  if ($allPids.Count -eq 0) { return @() }
+  $fg = [NmfWin32]::GetForegroundWindow()
+  if ($fg -ne [IntPtr]::Zero) {
+    $fgPid = [uint32]0
+    [void][NmfWin32]::GetWindowThreadProcessId($fg, [ref]$fgPid)
+    if ($allPids -contains [int]$fgPid) {
+      try { return @([System.Windows.Automation.AutomationElement]::FromHandle($fg)) } catch {}
+    }
+  }
+  $root = [System.Windows.Automation.AutomationElement]::RootElement
+  $children = $root.FindAll([System.Windows.Automation.TreeScope]::Children, [System.Windows.Automation.Condition]::TrueCondition)
+  $result = New-Object System.Collections.ArrayList
+  foreach ($win in $children) {
+    try {
+      if ($llbotPids -contains $win.Current.ProcessId -and $win.Current.NativeWindowHandle -ne 0) {
+        [void]$result.Add($win)
+        if ($result.Count -ge 5) { break }
+      }
+    } catch {}
+  }
+  foreach ($win in $children) {
+    try {
+      if ($qqPids -contains $win.Current.ProcessId -and $win.Current.NativeWindowHandle -ne 0) {
+        [void]$result.Add($win)
+        if ($result.Count -ge 5) { break }
+      }
+    } catch {}
+  }
+  return @($result)
+}
+
+$text = $env:NMF_WARMUP_TEXT
+$targetUserId = $env:NMF_TARGET_USER_ID
+$targetName = $env:NMF_TARGET_NAME
+$requireHint = $true
+$allowDirect = Is-True $env:NMF_ALLOW_DIRECT_PASTE
+$clickButton = Is-True $env:NMF_CLICK_SEND_BUTTON
+$buttonRegex = $env:NMF_BUTTON_REGEX
+if (-not $buttonRegex) { $buttonRegex = '\u53d1\u6d88\u606f|\u53d1\u9001\u6d88\u606f|\u804a\u5929|\u79c1\u804a' }
+$waitSeconds = 8.0
+try { $waitSeconds = [double]$env:NMF_WAIT_SECONDS } catch {}
+$deadline = (Get-Date).AddSeconds($waitSeconds)
+$hints = @($targetUserId, $targetName)
+
+while ((Get-Date) -lt $deadline) {
+  $windows = Get-QQWindows
+  foreach ($win in $windows) {
+    $hasHint = Element-Has-Hint $win $hints
+    if ($requireHint -and -not $hasHint) { continue }
+    try {
+      [NmfWin32]::ShowWindowAsync([IntPtr]$win.Current.NativeWindowHandle, 5) | Out-Null
+      [NmfWin32]::SetForegroundWindow([IntPtr]$win.Current.NativeWindowHandle) | Out-Null
+      Start-Sleep -Milliseconds 260
+    } catch {}
+
+    if ($clickButton) {
+      try {
+        $all = $win.FindAll([System.Windows.Automation.TreeScope]::Descendants, [System.Windows.Automation.Condition]::TrueCondition)
+        foreach ($item in $all) {
+          $name = ''
+          try { $name = $item.Current.Name + '' } catch {}
+          if (-not $name) { continue }
+          if ($name -match $buttonRegex) {
+            if (Invoke-Element $item) {
+              Start-Sleep -Milliseconds 1200
+              if (Paste-And-Enter $text) {
+                Out-Result $true 'sent_after_button' 'button'
+                exit 0
+              }
+            }
+          }
+        }
+      } catch {}
+    }
+
+    if ($allowDirect -and $hasHint) {
+      if (Paste-And-Enter $text) {
+        Out-Result $true 'sent_by_direct_paste' 'direct'
+        exit 0
+      }
+    }
+  }
+  Start-Sleep -Milliseconds 350
+}
+
+Out-Result $false 'target_qq_window_or_send_button_not_found' 'wait'
+"""
+        env = os.environ.copy()
+        env.update(
+            {
+                "NMF_GROUP_ID": group_id,
+                "NMF_TARGET_USER_ID": user_id,
+                "NMF_TARGET_NAME": target_name or "",
+                "NMF_WARMUP_TEXT": text,
+                "NMF_WAIT_SECONDS": str(max(2.0, self._get_float("qq_desktop_warmup_wait_seconds", 8.0))),
+                "NMF_REQUIRE_TARGET_HINT": "1"
+                if self._get_bool("qq_desktop_warmup_require_target_hint", True)
+                else "0",
+                "NMF_DEEP_TARGET_HINT": "1"
+                if self._get_bool("qq_desktop_warmup_deep_target_hint_enabled", True)
+                else "0",
+                "NMF_ALLOW_DIRECT_PASTE": "1"
+                if self._get_bool("qq_desktop_warmup_direct_paste_enabled", True)
+                else "0",
+                "NMF_CLICK_SEND_BUTTON": "1"
+                if self._get_bool("qq_desktop_warmup_click_send_button_enabled", True)
+                else "0",
+                "NMF_BUTTON_REGEX": self._string(
+                    self._get(
+                        "qq_desktop_warmup_button_regex",
+                        r"\u53d1\u6d88\u606f|\u53d1\u9001\u6d88\u606f|\u804a\u5929|\u79c1\u804a",
+                    )
+                ),
+            }
+        )
+        encoded = base64.b64encode(script.encode("utf-16le")).decode("ascii")
+        command = [
+            "powershell.exe",
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-STA",
+            "-EncodedCommand",
+            encoded,
+        ]
+        completed = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=env,
+            timeout=timeout,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        stdout = (completed.stdout or "").strip()
+        stderr = (completed.stderr or "").strip()
+        last_line = stdout.splitlines()[-1].strip() if stdout else ""
+        if last_line:
+            try:
+                result = json.loads(last_line)
+                if isinstance(result, dict):
+                    if completed.returncode and not result.get("ok"):
+                        result["returncode"] = completed.returncode
+                    return result
+            except json.JSONDecodeError:
+                pass
+        return {
+            "ok": False,
+            "reason": self._short_error(
+                RuntimeError(stderr or stdout or f"powershell exited with {completed.returncode}"),
+                300,
+            ),
+            "returncode": completed.returncode,
+        }
+
+    def _qq_protocol_profile_warmup_urls(self, group_id: str, user_id: str) -> list[str]:
+        raw_urls = [self._string(item) for item in self._get_list("qq_protocol_profile_warmup_urls")]
+        if not raw_urls:
+            raw_urls = [
+                "mqqapi://card/show_pslcard?src_type=internal&source=group&version=1&uin={user_id}&troopuin={group_id}",
+                "mqqapi://card/show_pslcard?src_type=internal&source=group&version=1&uin={user_id}&groupcode={group_id}",
+                "mqqapi://im/chat?chat_type=temp&uin={user_id}&groupuin={group_id}&version=1&src_type=web",
+            ]
+        urls: list[str] = []
+        replacements = {
+            "group_id": urllib.parse.quote(group_id, safe=""),
+            "user_id": urllib.parse.quote(user_id, safe=""),
+        }
+        for item in raw_urls:
+            if not item:
+                continue
+            try:
+                url = item.format(**replacements)
+            except Exception:
+                url = item
+            if url and url not in urls:
+                urls.append(url)
+        return urls
+
+    async def _activate_llbot_temp_context(self, bot: Any, group_id: str, user_id: str) -> bool:
+        if not self._get_bool("llbot_debug_temp_context_enabled", True):
+            return False
+        group_id = self._string(group_id)
+        user_id = self._string(user_id)
+        if not group_id.isdigit() or not user_id.isdigit():
+            return False
+        try:
+            uid = await self._call_llbot_debug(
+                bot,
+                "ntUserApi",
+                "getUidByUin",
+                [user_id, group_id],
+            )
+        except Exception as exc:
+            logger.warning(
+                "new_member_forwarder: LLBot debug temp context cannot resolve uid for user %s in group %s: %s",
+                user_id,
+                group_id,
+                self._short_error(exc),
+            )
+            return False
+
+        uid = self._string(uid)
+        if not uid:
+            logger.warning(
+                "new_member_forwarder: LLBot debug temp context got empty uid for user %s in group %s.",
+                user_id,
+                group_id,
+            )
+            return False
+
+        peer = {"chatType": 100, "peerUid": uid, "guildId": group_id}
+        topped = False
+        calls: list[tuple[str, list[Any]]] = [
+            ("setContactLocalTop", [peer, True]),
+            ("activateChat", [peer]),
+            ("activateChatAndGetHistory", [peer, 20]),
+            ("getAioFirstViewLatestMsgs", [peer, 20]),
+        ]
+        if self._get_bool("llbot_debug_temp_input_status_enabled", True):
+            event_type = max(0, int(self._get_float("llbot_debug_temp_input_status_event_type", 1)))
+            calls.append(("sendShowInputStatusReq", [100, event_type, uid]))
+
+        ok = False
+        for method, args in calls:
+            try:
+                await self._call_llbot_debug(bot, "ntMsgApi", method, args)
+                ok = True
+                if method == "setContactLocalTop":
+                    topped = True
+            except Exception as exc:
+                logger.info(
+                    "new_member_forwarder: LLBot debug temp context step %s soft-failed for user %s in group %s: %s",
+                    method,
+                    user_id,
+                    group_id,
+                    self._short_error(exc),
+                )
+        if topped:
+            try:
+                await self._call_llbot_debug(bot, "ntMsgApi", "setContactLocalTop", [peer, False])
+            except Exception:
+                pass
+
+        delay = max(0.0, self._get_float("llbot_debug_temp_context_delay_seconds", 0.8))
+        if delay:
+            await asyncio.sleep(delay)
+        if ok:
+            logger.info(
+                "new_member_forwarder: activated LLBot temp private context for user %s in group %s via debug api.",
+                user_id,
+                group_id,
+            )
+        return ok
+
+    async def _call_llbot_debug(self, bot: Any, api_class: str, method: str, args: list[Any]) -> Any:
+        return await bot.call_action(
+            "llonebot_debug",
+            apiClass=api_class,
+            method=method,
+            args=args,
+        )
 
     async def _check_group_member_list(
         self,
@@ -1344,6 +1870,15 @@ class NewMemberForwarderPlugin(Star):
         if not isinstance(member, dict):
             return ""
         for key in ("user_id", "userId", "uin", "qq"):
+            value = self._string(member.get(key))
+            if value:
+                return value
+        return ""
+
+    def _member_display_name(self, member: Any) -> str:
+        if not isinstance(member, dict):
+            return ""
+        for key in ("card_or_nickname", "card", "nickname", "nick", "name", "user_name"):
             value = self._string(member.get(key))
             if value:
                 return value
