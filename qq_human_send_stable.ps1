@@ -20,6 +20,13 @@ New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 
 Add-Type -AssemblyName System.Drawing
 Add-Type -AssemblyName System.Windows.Forms
+try {
+  Add-Type -AssemblyName UIAutomationClient -ErrorAction Stop
+  Add-Type -AssemblyName UIAutomationTypes -ErrorAction Stop
+  $script:UiaAvailable = $true
+} catch {
+  $script:UiaAvailable = $false
+}
 
 Add-Type -TypeDefinition @"
 using System;
@@ -264,7 +271,87 @@ function Save-Shot($Frame, [string]$Name) {
   $path
 }
 
-function Get-GroupPanelScore($Frame) {
+function Get-ElementHints($Element) {
+  $hints = New-Object System.Collections.ArrayList
+  foreach ($prop in @("Name", "AutomationId", "ClassName", "HelpText")) {
+    try {
+      $value = $Element.Current.$prop
+      if (($value + "").Trim()) {
+        [void]$hints.Add(($value + "").Trim())
+      }
+    } catch {}
+  }
+  @($hints)
+}
+
+function Get-GroupPanelAutomationScore($Frame) {
+  $result = [ordered]@{
+    Available = $script:UiaAvailable
+    Score = 0
+    Hints = @()
+  }
+  if (-not $script:UiaAvailable) {
+    return [pscustomobject]$result
+  }
+
+  $memberText = -join ([char[]](0x7fa4, 0x804a, 0x6210, 0x5458))
+  $noticeText = -join ([char[]](0x7fa4, 0x516c, 0x544a))
+  $searchText = -join ([char[]](0x641c, 0x7d22))
+  $ownerText = -join ([char[]](0x7fa4, 0x4e3b))
+  $adminText = -join ([char[]](0x7ba1, 0x7406, 0x5458))
+
+  try {
+    $root = [System.Windows.Automation.AutomationElement]::FromHandle($Frame.Handle)
+    if (-not $root) {
+      return [pscustomobject]$result
+    }
+    $all = $root.FindAll(
+      [System.Windows.Automation.TreeScope]::Descendants,
+      [System.Windows.Automation.Condition]::TrueCondition
+    )
+    $rightMin = $Frame.Left + [Math]::Max(0, $Frame.Width - 390)
+    $rightMax = $Frame.Left + $Frame.Width + 8
+    $topMin = $Frame.Top + 115
+    $hits = New-Object System.Collections.ArrayList
+    $score = 0
+    $limit = [Math]::Min($all.Count, 800)
+    for ($i = 0; $i -lt $limit; $i++) {
+      $el = $all.Item($i)
+      try {
+        $rect = $el.Current.BoundingRectangle
+        if ($rect.Width -le 0 -or $rect.Height -le 0) { continue }
+        $cx = $rect.X + ($rect.Width / 2.0)
+        $cy = $rect.Y + ($rect.Height / 2.0)
+        if ($cx -lt $rightMin -or $cx -gt $rightMax -or $cy -lt $topMin) { continue }
+      } catch {
+        continue
+      }
+
+      foreach ($hint in @(Get-ElementHints $el)) {
+        if ($hint -like "*$memberText*") {
+          $score += 50
+          if (-not $hits.Contains($hint)) { [void]$hits.Add($hint) }
+        } elseif ($hint -like "*$noticeText*") {
+          $score += 20
+          if (-not $hits.Contains($hint)) { [void]$hits.Add($hint) }
+        } elseif ($hint -like "*$ownerText*" -or $hint -like "*$adminText*") {
+          $score += 10
+          if (-not $hits.Contains($hint)) { [void]$hits.Add($hint) }
+        } elseif ($hint -like "*$searchText*") {
+          $score += 6
+          if ($hits.Count -lt 8 -and -not $hits.Contains($hint)) { [void]$hits.Add($hint) }
+        }
+      }
+    }
+    $result.Score = $score
+    $result.Hints = @($hits)
+  } catch {
+    $result.Available = $false
+  }
+  [pscustomobject]$result
+}
+
+function Get-GroupPanelPixelScore($Frame) {
   $lineHeight = [Math]::Min(520, [Math]::Max(160, $Frame.Height - 250))
   $x = $Frame.Left + $Frame.Width - 275
   $y = $Frame.Top + 135
@@ -288,22 +375,40 @@ function Get-GroupPanelScore($Frame) {
   }
 }
 
+function Get-GroupPanelScore($Frame) {
+  $pixel = Get-GroupPanelPixelScore $Frame
+  $automation = Get-GroupPanelAutomationScore $Frame
+  $detected = ($pixel.Ratio -gt 0.55) -or ($automation.Score -ge 20)
+  [pscustomobject]@{
+    Score = $pixel.Score
+    Height = $pixel.Height
+    Ratio = $pixel.Ratio
+    AutomationAvailable = $automation.Available
+    AutomationScore = $automation.Score
+    AutomationHints = @($automation.Hints)
+    GroupPanelDetected = $detected
+  }
+}
+
 function Wait-ForGroupPanel($Frame, [int]$Seconds) {
   $deadline = (Get-Date).AddSeconds($Seconds)
   $last = $null
   while ((Get-Date) -lt $deadline) {
     $last = Get-GroupPanelScore $Frame
-    if ($last.Ratio -gt 0.55) {
+    if ($last.GroupPanelDetected) {
       return $last
     }
     Start-Sleep -Milliseconds 500
+  }
+  if ($TargetQQ) {
+    return $last
   }
   throw ("group member panel was not detected; score=" + ($last | ConvertTo-Json -Compress))
 }
 
 function Assert-PrivateChat($Frame) {
   $score = Get-GroupPanelScore $Frame
-  if ($score.Ratio -gt 0.12) {
+  if ($score.GroupPanelDetected -or $score.Ratio -gt 0.12) {
     throw ("private chat guard refused to send; group panel still visible; score=" + ($score | ConvertTo-Json -Compress))
   }
   $score
