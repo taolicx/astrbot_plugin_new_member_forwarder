@@ -131,10 +131,17 @@ function Find-QQWindows {
 }
 
 function Get-MainQQWindow {
-  $windows = Find-QQWindows
-  $main = $windows | Where-Object { $_.Title -eq "QQ" -and $_.Width -ge 800 -and $_.Height -ge 600 } | Select-Object -First 1
+  $windows = @(Find-QQWindows)
+  $visibleWindows = @($windows | Where-Object { $_.Visible })
+  $main = $visibleWindows | Where-Object { $_.Title -eq "QQ" -and $_.Width -ge 800 -and $_.Height -ge 600 } | Sort-Object Area -Descending | Select-Object -First 1
   if (-not $main) {
-    $main = $windows | Where-Object { $_.Width -ge 800 -and $_.Height -ge 600 } | Select-Object -First 1
+    $main = $visibleWindows | Where-Object { $_.Width -ge 800 -and $_.Height -ge 600 } | Sort-Object Area -Descending | Select-Object -First 1
+  }
+  if (-not $main) {
+    $main = $windows | Where-Object { $_.Title -eq "QQ" -and $_.Width -ge 800 -and $_.Height -ge 600 } | Sort-Object Area -Descending | Select-Object -First 1
+  }
+  if (-not $main) {
+    $main = $windows | Where-Object { $_.Width -ge 800 -and $_.Height -ge 600 } | Sort-Object Area -Descending | Select-Object -First 1
   }
   if (-not $main) {
     throw "main QQ window not found"
@@ -160,6 +167,15 @@ function Click-At([int]$X, [int]$Y) {
   Start-Sleep -Milliseconds 70
   [NmfStable]::mouse_event(4, 0, 0, 0, [UIntPtr]::Zero)
   Start-Sleep -Milliseconds 350
+}
+
+function Click-AtFast([int]$X, [int]$Y) {
+  [NmfStable]::SetCursorPos($X, $Y) | Out-Null
+  Start-Sleep -Milliseconds 45
+  [NmfStable]::mouse_event(2, 0, 0, 0, [UIntPtr]::Zero)
+  Start-Sleep -Milliseconds 35
+  [NmfStable]::mouse_event(4, 0, 0, 0, [UIntPtr]::Zero)
+  Start-Sleep -Milliseconds 90
 }
 
 function DoubleClick-At([int]$X, [int]$Y) {
@@ -270,6 +286,83 @@ function Read-ImageText([string]$Path) {
   }
   $result = Await-WinRtOperation ($engine.RecognizeAsync($bitmap)) ([Windows.Media.Ocr.OcrResult])
   $result.Text
+}
+
+function Read-ImageOcrLines([string]$Path) {
+  Add-Type -AssemblyName System.Runtime.WindowsRuntime
+  $null = [Windows.Storage.StorageFile, Windows.Storage, ContentType=WindowsRuntime]
+  $null = [Windows.Storage.FileAccessMode, Windows.Storage, ContentType=WindowsRuntime]
+  $null = [Windows.Storage.Streams.IRandomAccessStream, Windows.Storage.Streams, ContentType=WindowsRuntime]
+  $null = [Windows.Graphics.Imaging.BitmapDecoder, Windows.Graphics.Imaging, ContentType=WindowsRuntime]
+  $null = [Windows.Graphics.Imaging.SoftwareBitmap, Windows.Graphics.Imaging, ContentType=WindowsRuntime]
+  $null = [Windows.Media.Ocr.OcrEngine, Windows.Foundation, ContentType=WindowsRuntime]
+  $null = [Windows.Media.Ocr.OcrResult, Windows.Foundation, ContentType=WindowsRuntime]
+
+  function Await-WinRtOperation($Operation, [type]$ResultType) {
+    $method = [System.WindowsRuntimeSystemExtensions].GetMethods() | Where-Object {
+      $_.Name -eq "AsTask" -and
+      $_.IsGenericMethod -and
+      $_.GetParameters().Count -eq 1 -and
+      $_.GetGenericArguments().Count -eq 1 -and
+      $_.ToString().StartsWith('System.Threading.Tasks.Task`1')
+    } | Select-Object -First 1
+    $generic = $method.MakeGenericMethod($ResultType)
+    $task = $generic.Invoke($null, @($Operation))
+    $task.GetAwaiter().GetResult()
+  }
+
+  $file = Await-WinRtOperation ([Windows.Storage.StorageFile]::GetFileFromPathAsync($Path)) ([Windows.Storage.StorageFile])
+  $stream = Await-WinRtOperation ($file.OpenAsync([Windows.Storage.FileAccessMode]::Read)) ([Windows.Storage.Streams.IRandomAccessStream])
+  $decoder = Await-WinRtOperation ([Windows.Graphics.Imaging.BitmapDecoder]::CreateAsync($stream)) ([Windows.Graphics.Imaging.BitmapDecoder])
+  $bitmap = Await-WinRtOperation ($decoder.GetSoftwareBitmapAsync()) ([Windows.Graphics.Imaging.SoftwareBitmap])
+  $engine = [Windows.Media.Ocr.OcrEngine]::TryCreateFromUserProfileLanguages()
+  if (-not $engine) {
+    throw "Windows OCR engine is not available"
+  }
+  $result = Await-WinRtOperation ($engine.RecognizeAsync($bitmap)) ([Windows.Media.Ocr.OcrResult])
+  $rows = New-Object System.Collections.ArrayList
+  foreach ($line in @($result.Lines)) {
+    $words = @($line.Words)
+    if (-not $words -or $words.Count -eq 0) { continue }
+    $left = [double]::PositiveInfinity
+    $top = [double]::PositiveInfinity
+    $right = 0.0
+    $bottom = 0.0
+    foreach ($word in $words) {
+      $rect = $word.BoundingRect
+      $left = [Math]::Min($left, [double]$rect.X)
+      $top = [Math]::Min($top, [double]$rect.Y)
+      $right = [Math]::Max($right, [double]($rect.X + $rect.Width))
+      $bottom = [Math]::Max($bottom, [double]($rect.Y + $rect.Height))
+    }
+    [void]$rows.Add([pscustomobject]@{
+      Text = $line.Text
+      Left = $left
+      Top = $top
+      Width = $right - $left
+      Height = $bottom - $top
+    })
+  }
+  @($rows)
+}
+
+function Get-MemberSearchY($Frame, [string]$ShotPath) {
+  try {
+    $rightPanelMinX = [Math]::Max(0, $Frame.Width - 430)
+    foreach ($line in @(Read-ImageOcrLines $ShotPath)) {
+      $text = (($line.Text + "") -replace "\s+", "")
+      $centerX = [double]$line.Left + ([double]$line.Width / 2.0)
+      if ($centerX -lt $rightPanelMinX) { continue }
+      if ($text -like "*群成员*" -or $text -like "*成员*") {
+        $y = [int]($Frame.Top + [double]$line.Top + ([double]$line.Height / 2.0))
+        Write-TraceStage ("member-search-y-ocr text=" + $text + " y=" + $y)
+        return $y
+      }
+    }
+  } catch {
+    Write-TraceStage ("member-search-y-ocr-failed " + $_.Exception.Message)
+  }
+  return 0
 }
 
 function Assert-ProfileQQ([string]$ShotPath, [string]$ExpectedQQ) {
@@ -445,7 +538,7 @@ function Wait-ForGroupPanel($Frame, [int]$Seconds) {
   $last = $null
   while ((Get-Date) -lt $deadline) {
     $last = Get-GroupPanelScore $Frame
-    if ($last.GroupPanelDetected -or $TargetQQ) {
+    if ($last.GroupPanelDetected) {
       return $last
     }
     Start-Sleep -Milliseconds 500
@@ -454,6 +547,34 @@ function Wait-ForGroupPanel($Frame, [int]$Seconds) {
     return $last
   }
   throw ("group member panel was not detected; score=" + ($last | ConvertTo-Json -Compress))
+}
+
+function Try-OpenGroupPanel($Frame) {
+  $right = [int]($Frame.Left + $Frame.Width)
+  $top = [int]$Frame.Top
+  $height = [int]$Frame.Height
+  $points = @(
+    @{ X = $right - 165; Y = $top + 100; Label = "top-grid" },
+    @{ X = $right - 135; Y = $top + 100; Label = "top-grid-arrow" },
+    @{ X = $right - 95; Y = $top + 100; Label = "top-shield" },
+    @{ X = $right - 34; Y = $top + 100; Label = "top-more" },
+    @{ X = $right - 255; Y = $top + [int]($height * 0.43); Label = "side-handle" },
+    @{ X = $right - 18; Y = $top + [int]($height * 0.43); Label = "right-edge" }
+  )
+  foreach ($pt in $points) {
+    Write-TraceStage ("try-open-group-panel " + $pt.Label + " x=" + $pt.X + " y=" + $pt.Y)
+    Click-At ([int]$pt.X) ([int]$pt.Y)
+    Start-Sleep -Milliseconds 700
+    $fresh = Get-MainQQWindow
+    $script:MainHandleValue = $fresh.HandleValue
+    $score = Get-GroupPanelScore $fresh
+    Write-TraceStage ("try-open-group-panel-score " + $pt.Label + "=" + ($score | ConvertTo-Json -Compress))
+    if ($score.GroupPanelDetected) {
+      return [pscustomobject]@{ Frame = $fresh; Score = $score }
+    }
+    Press-Escape
+  }
+  return $null
 }
 
 function Assert-PrivateChat($Frame) {
@@ -600,9 +721,9 @@ $script:MainHandleValue = $main.HandleValue
 [void]$shots.Add((Save-Shot $main "02-after-group-click.png"))
 if ($TargetQQ) {
   Write-TraceStage "check-group-panel-target"
-  $groupScore = Wait-ForGroupPanel $main $WaitSeconds
+  $groupScore = Wait-ForGroupPanel $main 3
   Write-TraceStage ("group-panel-score=" + ($groupScore | ConvertTo-Json -Compress))
-  if ($groupScore.Score -eq 0 -and $groupScore.Ratio -eq 0) {
+  if (-not $groupScore.GroupPanelDetected) {
     $retryGroupX = $main.Left + 170
     Write-TraceStage ("retry-click-group x=" + $retryGroupX + " y=" + $groupY)
     Click-At $retryGroupX $groupY
@@ -612,6 +733,18 @@ if ($TargetQQ) {
     [void]$shots.Add((Save-Shot $main "02b-after-group-retry.png"))
     $groupScore = Wait-ForGroupPanel $main 3
     Write-TraceStage ("group-panel-retry-score=" + ($groupScore | ConvertTo-Json -Compress))
+  }
+  if (-not $groupScore.GroupPanelDetected) {
+    $openedPanel = Try-OpenGroupPanel $main
+    if ($openedPanel) {
+      $main = $openedPanel.Frame
+      $script:MainHandleValue = $main.HandleValue
+      $groupScore = $openedPanel.Score
+      [void]$shots.Add((Save-Shot $main "02c-after-panel-open.png"))
+    }
+  }
+  if (-not $groupScore.GroupPanelDetected) {
+    throw ("group member panel was not detected before member search; score=" + ($groupScore | ConvertTo-Json -Compress))
   }
   [void]$steps.Add("group-panel-ok")
 } else {
@@ -632,17 +765,36 @@ if ($TargetQQ) {
   $mainLeft = [int]$main.Left
   $mainTop = [int]$main.Top
   $mainWidth = [int]$main.Width
-  $searchIconX = $mainLeft + $mainWidth - 31
-  foreach ($searchIconY in @(($mainTop + 210), ($mainTop + 218), ($mainTop + 226), ($mainTop + 238), ($mainTop + 246), ($mainTop + 258), ($mainTop + 276))) {
-    Write-TraceStage ("click-member-search x=" + $searchIconX + " y=" + $searchIconY)
-    Click-At $searchIconX $searchIconY
-    Start-Sleep -Milliseconds 180
+  $searchRight = $mainLeft + $mainWidth
+  $panelShot = Save-Shot $main "02d-member-panel-before-search.png"
+  [void]$shots.Add($panelShot)
+  $memberSearchY = Get-MemberSearchY $main $panelShot
+  if ($memberSearchY -gt 0) {
+    $candidateSearchYs = @($memberSearchY, ($memberSearchY + 8), ($memberSearchY - 8))
+    $primarySearchY = $memberSearchY
+  } else {
+    $candidateSearchYs = @(($mainTop + 258), ($mainTop + 270), ($mainTop + 246), ($mainTop + 282))
+    $primarySearchY = $mainTop + 258
+  }
+  foreach ($rawSearchIconY in $candidateSearchYs) {
+    $searchIconY = [int]([Math]::Max($mainTop + 230, [Math]::Min($mainTop + 330, [int]$rawSearchIconY)))
+    foreach ($searchIconX in @(($searchRight - 31), ($searchRight - 48))) {
+      Write-TraceStage ("click-member-search x=" + $searchIconX + " y=" + $searchIconY)
+      Click-AtFast $searchIconX $searchIconY
+    }
+    $searchInputX = [int]($searchRight - 145)
+    Write-TraceStage ("focus-member-search-input x=" + $searchInputX + " y=" + $searchIconY)
+    Click-AtFast $searchInputX $searchIconY
   }
   Start-Sleep -Milliseconds 400
-  Write-TraceStage "clear-member-search"
-  Press-CtrlA-Backspace
-  Write-TraceStage "paste-target-qq"
-  Paste-Text $TargetQQ
+  $primarySearchY = [int]([Math]::Max($mainTop + 230, [Math]::Min($mainTop + 330, [int]$primarySearchY)))
+  $searchInputX = [int]($searchRight - 145)
+  Write-TraceStage ("focus-member-search-input-final x=" + $searchInputX + " y=" + $primarySearchY)
+  Click-At $searchInputX $primarySearchY
+  Write-TraceStage "type-target-qq"
+  if (-not (Type-Digits $TargetQQ)) {
+    Paste-Text $TargetQQ
+  }
   Start-Sleep -Seconds 1
   Write-TraceStage "close-interfering-popups"
   Close-ProfilePopups
