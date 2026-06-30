@@ -31,7 +31,7 @@ class TempSessionNotReadyError(RuntimeError):
     PLUGIN_NAME,
     "Codex",
     "管理员私聊录制新人入群资料，新人进群时自动私聊转发文字、图片和聊天记录。",
-    "1.4.22",
+    "1.4.23",
 )
 class NewMemberForwarderPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig | None = None):
@@ -49,6 +49,7 @@ class NewMemberForwarderPlugin(Star):
         self._qq_desktop_warmup_last_at: dict[str, float] = {}
         self._qq_desktop_warmup_sent_at: dict[str, float] = {}
         self._qq_human_group_warmup_last_at: dict[str, float] = {}
+        self._qq_human_group_warmup_results: dict[str, dict[str, Any]] = {}
         self._test_delivery_running_until = 0.0
         self.data_dir = self._resolve_data_dir()
         self.media_dir = self.data_dir / "media"
@@ -435,7 +436,10 @@ class NewMemberForwarderPlugin(Star):
         if ok:
             yield event.plain_result(f"真人开路已执行：QQ {user_id}，来源群 {group_id}。")
         else:
-            yield event.plain_result("真人开路未成功执行；请看插件日志里的 human QQ group warmup 失败原因。")
+            result = self._qq_human_group_warmup_results.get(f"{group_id}:{user_id}") or {}
+            reason = self._string(result.get("reason")) or "unknown"
+            stage = self._string(result.get("stage")) or "-"
+            yield event.plain_result(f"真人开路未成功执行：stage={stage}，reason={reason}")
 
     @filter.platform_adapter_type(filter.PlatformAdapterType.AIOCQHTTP)
     @filter.command("新人欢迎诊断")
@@ -1295,6 +1299,11 @@ class NewMemberForwarderPlugin(Star):
                 timeout,
             )
         except Exception as exc:
+            self._qq_human_group_warmup_results[key] = {
+                "ok": False,
+                "stage": "python",
+                "reason": self._short_error(exc),
+            }
             logger.warning(
                 "new_member_forwarder: human QQ group warmup failed for user %s in group %s: %s",
                 user_id,
@@ -1303,6 +1312,7 @@ class NewMemberForwarderPlugin(Star):
             )
             return False
 
+        self._qq_human_group_warmup_results[key] = result if isinstance(result, dict) else {"ok": False, "reason": result}
         if result.get("ok"):
             self._qq_desktop_warmup_sent_at[key] = time.time()
             logger.info(
@@ -1567,6 +1577,24 @@ function Invoke-Element($element, [bool]$doubleClick) {
   return $false
 }
 
+function Click-NearLeftOfElement($element) {
+  try {
+    $rect = $element.Current.BoundingRectangle
+    if ($rect.Width -le 0 -or $rect.Height -le 0) { return $false }
+    $x = [int]($rect.Left - 34)
+    if ($x -lt 0) { $x = [int]($rect.Left + 8) }
+    $y = [int]($rect.Top + $rect.Height / 2)
+    [NmfHumanWin32]::SetCursorPos($x, $y) | Out-Null
+    Start-Sleep -Milliseconds 90
+    [NmfHumanWin32]::mouse_event(2, 0, 0, 0, [UIntPtr]::Zero)
+    Start-Sleep -Milliseconds 75
+    [NmfHumanWin32]::mouse_event(4, 0, 0, 0, [UIntPtr]::Zero)
+    Start-Sleep -Milliseconds 750
+    return $true
+  } catch {}
+  return $false
+}
+
 function Focus-Window($win) {
   try {
     [NmfHumanWin32]::ShowWindowAsync([IntPtr]$win.Current.NativeWindowHandle, 5) | Out-Null
@@ -1599,6 +1627,88 @@ function Get-QQWindows {
     } catch {}
   }
   return @($result)
+}
+
+function Get-QQProcessCount {
+  $count = 0
+  foreach ($name in @('QQ','llbot','LLOneBot')) {
+    try { $count += @(Get-Process $name -ErrorAction SilentlyContinue).Count } catch {}
+  }
+  return $count
+}
+
+function Focus-FirstQQWindow {
+  foreach ($win in (Get-QQWindows)) {
+    if (Focus-Window $win) { return $true }
+  }
+  return $false
+}
+
+function Find-SearchEdit($root) {
+  try {
+    $all = $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, [System.Windows.Automation.Condition]::TrueCondition)
+    $best = $null
+    $bestScore = -1
+    foreach ($item in $all) {
+      $text = Get-ElementTextBundle $item
+      $score = 0
+      try {
+        $ctype = $item.Current.ControlType.ProgrammaticName + ''
+        if ($ctype -match 'Edit|Document') { $score += 20 }
+      } catch {}
+      if ($text -match '搜索|查找|Search|search') { $score += 40 }
+      if ($score -le 0) { continue }
+      try {
+        $rect = $item.Current.BoundingRectangle
+        if ($rect.Width -le 0 -or $rect.Height -le 0) { continue }
+        if ($rect.Width -gt 600 -or $rect.Height -gt 80) { $score -= 10 }
+      } catch { continue }
+      if ($score -gt $bestScore) {
+        $best = $item
+        $bestScore = $score
+      }
+    }
+    return $best
+  } catch {}
+  return $null
+}
+
+function Clear-And-TypeQuery([string]$query) {
+  Press-CtrlKey 0x41
+  Start-Sleep -Milliseconds 120
+  Paste-TextOnly $query | Out-Null
+  Start-Sleep -Milliseconds 350
+}
+
+function Try-OpenGroupFromQQSearch([string[]]$groupHints, [bool]$requireGroupHint) {
+  if (-not (Is-True $env:NMF_GROUP_SEARCH)) { return $false }
+  $query = $env:NMF_GROUP_NAME
+  if (-not $query) { $query = $env:NMF_GROUP_ID }
+  if (-not $query) { return $false }
+
+  foreach ($win in (Get-QQWindows)) {
+    Focus-Window $win | Out-Null
+    $edit = Find-SearchEdit $win
+    if ($edit -ne $null) {
+      if (Invoke-Element $edit $false) {
+        Start-Sleep -Milliseconds 250
+        Clear-And-TypeQuery $query
+        Press-Key 0x0D
+        Start-Sleep -Milliseconds 1300
+        if ((Find-GroupWindow $groupHints $requireGroupHint) -ne $null) { return $true }
+      }
+    }
+
+    Press-CtrlKey 0x46
+    Start-Sleep -Milliseconds 250
+    Clear-And-TypeQuery $query
+    Press-Key 0x0D
+    Start-Sleep -Milliseconds 1300
+    if ((Find-GroupWindow $groupHints $requireGroupHint) -ne $null) { return $true }
+    Press-Key 0x1B
+    Start-Sleep -Milliseconds 300
+  }
+  return $false
 }
 
 function Open-GroupByProtocol([string]$groupId) {
@@ -1735,15 +1845,28 @@ try { $waitSeconds = [double]$env:NMF_WAIT_SECONDS } catch {}
 $groupHints = @($groupName, $groupId)
 $targetHints = @($targetUserId, $targetName)
 
+if ((Get-QQProcessCount) -le 0) {
+  Out-Result $false 'qq_process_not_found' 'startup'
+  exit 0
+}
+if (-not (Focus-FirstQQWindow)) {
+  Out-Result $false 'visible_qq_window_not_found' 'startup'
+  exit 0
+}
+
 Open-GroupByProtocol $groupId
 $deadline = (Get-Date).AddSeconds($waitSeconds)
 $groupWin = $null
+$searchedGroup = $false
 while ((Get-Date) -lt $deadline -and $groupWin -eq $null) {
   $groupWin = Find-GroupWindow $groupHints $requireGroupHint
+  if ($groupWin -eq $null -and -not $searchedGroup) {
+    $searchedGroup = Try-OpenGroupFromQQSearch $groupHints $requireGroupHint
+  }
   if ($groupWin -eq $null) { Start-Sleep -Milliseconds 450 }
 }
 if ($groupWin -eq $null) {
-  Out-Result $false 'group_window_not_found_or_group_hint_missing' 'group'
+  Out-Result $false 'group_window_not_found_after_protocol_and_search' 'group'
   exit 0
 }
 
@@ -1752,6 +1875,14 @@ $searched = $false
 while ((Get-Date) -lt $deadline) {
   $target = Find-TargetElement $groupWin $targetHints
   if ($target -ne $null) {
+    if (Click-NearLeftOfElement $target) {
+      if (Try-ClickSendMessageButton $targetHints $buttonRegex $requireTargetHint) {
+        if (Paste-And-Enter $text) {
+          Out-Result $true 'sent_after_group_member_avatar_area_button' 'send_button'
+          exit 0
+        }
+      }
+    }
     if (Invoke-Element $target $false) {
       Start-Sleep -Milliseconds 950
       if (Try-ClickSendMessageButton $targetHints $buttonRegex $requireTargetHint) {
@@ -1800,6 +1931,9 @@ Out-Result $false 'target_member_or_send_message_button_not_found' 'target'
                 else "0",
                 "NMF_MEMBER_SEARCH": "1"
                 if self._get_bool("qq_human_group_warmup_member_search_enabled", True)
+                else "0",
+                "NMF_GROUP_SEARCH": "1"
+                if self._get_bool("qq_human_group_warmup_group_search_enabled", True)
                 else "0",
                 "NMF_OPEN_GROUP_PROTOCOL": "1"
                 if self._get_bool("qq_human_group_warmup_open_group_protocol_enabled", True)

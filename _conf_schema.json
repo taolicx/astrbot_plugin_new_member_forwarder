@@ -104,6 +104,11 @@
     "description": "在群窗口中找不到新人时，尝试用 Ctrl+F 搜索新人昵称或 QQ。",
     "default": true
   },
+  "qq_human_group_warmup_group_search_enabled": {
+    "type": "bool",
+    "description": "找不到来源群窗口时，尝试聚焦 QQ 并通过 QQ 搜索框查找来源群。",
+    "default": true
+  },
   "qq_human_group_warmup_open_group_protocol_enabled": {
     "type": "bool",
     "description": "执行真人式开路前先通过 QQ 协议拉起来源群窗口；后续仍会校验群窗口线索。",
