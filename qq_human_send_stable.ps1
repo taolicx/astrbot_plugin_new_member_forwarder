@@ -74,6 +74,7 @@ public class NmfStable {
 $script:ProfileTitle = -join ([char[]](0x8d44, 0x6599, 0x5361))
 $script:NoticeTitle = -join ([char[]](0x7fa4, 0x516c, 0x544a))
 $script:LastGroupLikeShot = ""
+$script:LastSearchResultOpenFailed = $false
 if ($MessageKind -eq "text" -and -not $Message) {
   $Message = -join ([char[]](0x6b22, 0x8fce, 0x8fdb, 0x7fa4))
 }
@@ -998,41 +999,6 @@ function Open-SearchResultPrivateChat($MainFrame, [int]$BaseY, $Calibration = $n
   return $null
 }
 
-function Open-SearchResultProfile($MainFrame, [int]$BaseY) {
-  $right = [int]($MainFrame.Left + $MainFrame.Width)
-  $top = [int]$MainFrame.Top
-  $rowY = [int]($top + $BaseY)
-  $points = New-SearchResultClickPoints $MainFrame $BaseY
-
-  foreach ($pt in $points) {
-    Write-TraceStage ("click-search-result " + $pt.Label + " x=" + $pt.X + " y=" + $pt.Y)
-    Click-At ([int]$pt.X) ([int]$pt.Y)
-    $profile = Wait-ForProfileQuick 1650
-    if ($profile) { return $profile }
-  }
-
-  foreach ($idx in @(0, 1, 3)) {
-    $pt = $points[$idx]
-    Write-TraceStage ("double-click-search-result " + $pt.Label + " x=" + $pt.X + " y=" + $pt.Y)
-    DoubleClick-At ([int]$pt.X) ([int]$pt.Y)
-    $profile = Wait-ForProfileQuick 1900
-    if ($profile) { return $profile }
-  }
-
-  foreach ($dy in @(-34, 0, 34)) {
-    foreach ($dx in @(-250, -205)) {
-      $x = [int]($right + $dx)
-      $y = [int]($rowY + $dy)
-      Write-TraceStage ("last-click-search-result x=" + $x + " y=" + $y)
-      Click-At $x $y
-      $profile = Wait-ForProfileQuick 1450
-      if ($profile) { return $profile }
-    }
-  }
-
-  return $null
-}
-
 function New-RelativePoint($Frame, [int]$X, [int]$Y, [string]$Anchor) {
   [ordered]@{
     anchor = $Anchor
@@ -1241,6 +1207,7 @@ function Invoke-Calibration {
 }
 
 function Invoke-MemberSearchFromPage($MainFrame, [string]$Prefix, $Calibration = $null) {
+  $script:LastSearchResultOpenFailed = $false
   $mainLeft = [int]$MainFrame.Left
   $mainTop = [int]$MainFrame.Top
   $mainWidth = [int]$MainFrame.Width
@@ -1305,24 +1272,10 @@ function Invoke-MemberSearchFromPage($MainFrame, [string]$Prefix, $Calibration =
     return $privateOpened
   }
 
-  Write-TraceStage ("context-menu-private-chat-not-opened-try-profile " + $Prefix)
-  $calibratedResult = Get-CalibratedPoint $Calibration "searchResultFirst" $fresh
-  if ($calibratedResult) {
-    $script:CalibrationUsed = $true
-    Write-TraceStage ("click-search-result-calibrated " + $Prefix + " x=" + $calibratedResult.X + " y=" + $calibratedResult.Y)
-    Click-At $calibratedResult.X $calibratedResult.Y
-    $foundProfile = Wait-ForProfileQuick 2800
-    if (-not $foundProfile) {
-      DoubleClick-At $calibratedResult.X $calibratedResult.Y
-      $foundProfile = Wait-ForProfileQuick 3200
-    }
-  } else {
-    $foundProfile = Open-SearchResultProfile $fresh $SearchResultBaseY
-  }
-  if (-not $foundProfile) {
-    [void]$shots.Add((Save-Shot $fresh ($Prefix + "-after-result-clicks.png")))
-  }
-  return $foundProfile
+  Write-TraceStage ("context-menu-private-chat-not-opened " + $Prefix)
+  $script:LastSearchResultOpenFailed = $true
+  [void]$shots.Add((Save-Shot $fresh ($Prefix + "-after-context-menu-send-message-failed.png")))
+  return $null
 }
 
 $shots = New-Object System.Collections.ArrayList
@@ -1452,6 +1405,10 @@ if ($profile -and $profile.PSObject.Properties["PrivateChatOpened"] -and [bool]$
   $privateChatOpenedBySearch = $true
   Write-TraceStage ("private-chat-opened-result via=" + $profile.Via)
   [void]$steps.Add("private-chat-opened-by-search-context-menu")
+}
+
+if (-not $profile -and $TargetQQ -and $script:LastSearchResultOpenFailed) {
+  throw "right-click send message did not open private chat"
 }
 
 if (-not $profile -and -not $privateChatOpenedBySearch) {
