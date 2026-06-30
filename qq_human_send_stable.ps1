@@ -464,18 +464,37 @@ function Assert-PrivateChat($Frame) {
 }
 
 function Close-ProfilePopups {
-  foreach ($popup in @(Find-QQWindows | Where-Object { $_.Title -eq $script:ProfileTitle })) {
+  foreach ($popup in @(Find-QQWindows | Where-Object {
+    $_.HandleValue -ne $script:MainHandleValue -and
+    ($_.Title -eq $script:ProfileTitle -or ($_.Width -ge 300 -and $_.Width -le 900 -and $_.Height -ge 300 -and $_.Height -le 1000))
+  })) {
     [NmfStable]::PostMessage($popup.Handle, 0x0010, [UIntPtr]::Zero, [UIntPtr]::Zero) | Out-Null
   }
   Start-Sleep -Milliseconds 400
 }
 
+function Get-ProfileCandidate {
+  $windows = @(Find-QQWindows | Where-Object {
+    $_.Visible -and
+    $_.HandleValue -ne $script:MainHandleValue -and
+    $_.Left -ge 0 -and
+    $_.Top -ge 0 -and
+    $_.Width -gt 300 -and
+    $_.Height -gt 300 -and
+    $_.Width -lt 1000 -and
+    $_.Height -lt 1100
+  })
+  $exact = $windows | Where-Object { $_.Title -eq $script:ProfileTitle } | Select-Object -First 1
+  if ($exact) { return $exact }
+  $fallback = $windows | Sort-Object Area -Descending | Select-Object -First 1
+  if ($fallback) { return $fallback }
+  return $null
+}
+
 function Wait-ForProfile([int]$Seconds) {
   $deadline = (Get-Date).AddSeconds($Seconds)
   while ((Get-Date) -lt $deadline) {
-    $profile = Find-QQWindows | Where-Object {
-      $_.Title -eq $script:ProfileTitle -and $_.Visible -and $_.Left -ge 0 -and $_.Top -ge 0 -and $_.Width -gt 300 -and $_.Height -gt 300
-    } | Select-Object -First 1
+    $profile = Get-ProfileCandidate
     if ($profile) {
       return $profile
     }
@@ -493,25 +512,29 @@ function Try-WaitForProfile([int]$Seconds) {
 }
 
 function Open-SearchResultProfile($MainFrame, [int]$BaseY) {
-  $rowY = $MainFrame.Top + $BaseY
-  $avatarX = $MainFrame.Left + $MainFrame.Width - 240
-  $nameX = $MainFrame.Left + $MainFrame.Width - 185
+  $xOffsets = @(-255, -225, -195, -165)
+  $yOffsets = @(-40, -20, 0, 22, 45)
+  foreach ($dy in $yOffsets) {
+    $rowY = $MainFrame.Top + $BaseY + $dy
+    foreach ($dx in $xOffsets) {
+      $x = $MainFrame.Left + $MainFrame.Width + $dx
+      Write-TraceStage ("click-search-result x=" + $x + " y=" + $rowY)
+      Click-At $x $rowY
+      $profile = Try-WaitForProfile 1
+      if ($profile) { return $profile }
+    }
+  }
 
-  Click-At $avatarX $rowY
-  $profile = Try-WaitForProfile 2
-  if ($profile) { return $profile }
-
-  Click-At $nameX $rowY
-  $profile = Try-WaitForProfile 2
-  if ($profile) { return $profile }
-
-  DoubleClick-At $avatarX $rowY
-  $profile = Try-WaitForProfile 2
-  if ($profile) { return $profile }
-
-  DoubleClick-At $nameX $rowY
-  $profile = Try-WaitForProfile 2
-  if ($profile) { return $profile }
+  foreach ($dy in @(0, -25, 25)) {
+    $rowY = $MainFrame.Top + $BaseY + $dy
+    foreach ($dx in @(-240, -185)) {
+      $x = $MainFrame.Left + $MainFrame.Width + $dx
+      Write-TraceStage ("double-click-search-result x=" + $x + " y=" + $rowY)
+      DoubleClick-At $x $rowY
+      $profile = Try-WaitForProfile 1
+      if ($profile) { return $profile }
+    }
+  }
 
   return $null
 }
@@ -523,6 +546,7 @@ Write-TraceStage "close-profile-popups"
 Close-ProfilePopups
 Write-TraceStage "get-main-window"
 $main = Get-MainQQWindow
+$script:MainHandleValue = $main.HandleValue
 Write-TraceStage ("main-window=" + ($main | ConvertTo-Json -Compress))
 Write-TraceStage "focus-main-window"
 Focus-Maximized $main.Handle
@@ -530,6 +554,7 @@ Write-TraceStage "press-escape"
 Press-Escape
 Press-Escape
 $main = Get-MainQQWindow
+$script:MainHandleValue = $main.HandleValue
 [void]$shots.Add((Save-Shot $main "01-maximized-start.png"))
 [void]$steps.Add("maximized")
 Write-TraceStage "maximized"
@@ -541,6 +566,7 @@ Write-TraceStage ("click-group x=" + $groupX + " y=" + $groupY)
 Click-At $groupX $groupY
 Start-Sleep -Milliseconds 900
 $main = Get-MainQQWindow
+$script:MainHandleValue = $main.HandleValue
 [void]$shots.Add((Save-Shot $main "02-after-group-click.png"))
 if ($TargetQQ) {
   Write-TraceStage "check-group-panel-target"
@@ -563,10 +589,12 @@ $usedMemberSearch = $false
 if ($TargetQQ) {
   $usedMemberSearch = $true
   $searchIconX = $main.Left + $main.Width - 31
-  $searchIconY = $main.Top + 264
-  Write-TraceStage ("click-member-search x=" + $searchIconX + " y=" + $searchIconY)
-  Click-At $searchIconX $searchIconY
-  Start-Sleep -Milliseconds 500
+  foreach ($searchIconY in @($main.Top + 246, $main.Top + 258, $main.Top + 264, $main.Top + 276)) {
+    Write-TraceStage ("click-member-search x=" + $searchIconX + " y=" + $searchIconY)
+    Click-At $searchIconX $searchIconY
+    Start-Sleep -Milliseconds 180
+  }
+  Start-Sleep -Milliseconds 400
   Write-TraceStage "clear-member-search"
   Press-CtrlA-Backspace
   Write-TraceStage "paste-target-qq"
@@ -601,8 +629,10 @@ Write-TraceStage ("click-send-button x=" + $sendX + " y=" + $sendY)
 Click-At $sendX $sendY
 Start-Sleep -Seconds 1
 $main = Get-MainQQWindow
+$script:MainHandleValue = $main.HandleValue
 Focus-Maximized $main.Handle
 $main = Get-MainQQWindow
+$script:MainHandleValue = $main.HandleValue
 [void]$shots.Add((Save-Shot $main "05-private-chat-before-send.png"))
 Write-TraceStage "assert-private-chat"
 $privateScore = Assert-PrivateChat $main
