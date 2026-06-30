@@ -30,7 +30,7 @@ class TempSessionNotReadyError(RuntimeError):
     PLUGIN_NAME,
     "Codex",
     "管理员私聊录制新人入群资料，新人进群时自动私聊转发文字、图片和聊天记录。",
-    "1.4.26",
+    "1.4.27",
 )
 class NewMemberForwarderPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig | None = None):
@@ -1668,7 +1668,7 @@ function Focus-Window($win) {
 }
 
 function Get-QQWindows {
-  $names = @('QQ','llbot','LLOneBot')
+  $names = @('QQ')
   $allPids = New-Object System.Collections.ArrayList
   foreach ($name in $names) {
     try {
@@ -1693,7 +1693,7 @@ function Get-QQWindows {
 
 function Get-QQProcessCount {
   $count = 0
-  foreach ($name in @('QQ','llbot','LLOneBot')) {
+  foreach ($name in @('QQ')) {
     try { $count += @(Get-Process $name -ErrorAction SilentlyContinue).Count } catch {}
   }
   return $count
@@ -1784,28 +1784,24 @@ function Try-OpenGroupFromQQSearch([string[]]$groupHints, [bool]$requireGroupHin
   if (-not $query) { return $false }
 
   foreach ($win in (Get-QQWindows)) {
+    Write-Stage 'group_search_keyboard'
     Focus-Window $win | Out-Null
-    $edit = Find-SearchEdit $win
-    if ($edit -ne $null) {
-      if (Invoke-Element $edit $false) {
-        Start-Sleep -Milliseconds 250
-        Clear-And-TypeQuery $query
-        Press-Key 0x0D
-        Start-Sleep -Milliseconds 1300
-        if ((Find-GroupWindow $groupHints $requireGroupHint) -ne $null) { return $true }
-      }
-    }
-
     Press-CtrlKey 0x46
     Start-Sleep -Milliseconds 250
     Clear-And-TypeQuery $query
     Press-Key 0x0D
     Start-Sleep -Milliseconds 1300
-    if ((Find-GroupWindow $groupHints $requireGroupHint) -ne $null) { return $true }
+    $verified = Find-GroupWindow $groupHints $requireGroupHint
+    if ($verified -ne $null) { return $verified }
+    $visibleQQ = @(Get-QQWindows)
+    if ($visibleQQ.Count -eq 1) {
+      Write-Stage 'group_search_single_window_fallback'
+      return $win
+    }
     Press-Key 0x1B
     Start-Sleep -Milliseconds 300
   }
-  return $false
+  return $null
 }
 
 function Open-GroupByProtocol([string]$groupId) {
@@ -1976,7 +1972,9 @@ while ((Get-Date) -lt $deadline -and $groupWin -eq $null) {
   $groupWin = Find-GroupWindow $groupHints $requireGroupHint
   if ($groupWin -eq $null -and -not $searchedGroup) {
     Write-Stage 'group_search'
-    $searchedGroup = Try-OpenGroupFromQQSearch $groupHints $requireGroupHint
+    $searchedGroup = $true
+    $searchedGroupWin = Try-OpenGroupFromQQSearch $groupHints $requireGroupHint
+    if ($searchedGroupWin -ne $null) { $groupWin = $searchedGroupWin }
   }
   if ($groupWin -eq $null) { Start-Sleep -Milliseconds 450 }
 }
