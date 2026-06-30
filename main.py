@@ -30,7 +30,7 @@ class TempSessionNotReadyError(RuntimeError):
     PLUGIN_NAME,
     "Codex",
     "管理员私聊录制新人入群资料，新人进群时自动私聊转发文字、图片和聊天记录。",
-    "1.4.37",
+    "1.4.38",
 )
 class NewMemberForwarderPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig | None = None):
@@ -4307,7 +4307,7 @@ Out-Result $false 'target_qq_window_or_send_button_not_found' 'wait'
     def _is_admin(self, user_id: str) -> bool:
         admins = [self._string(item) for item in self._get_list("admin_user_ids")]
         admins = [item for item in admins if item]
-        return not admins or user_id in admins
+        return bool(user_id and user_id in admins)
 
     def _is_self_sender(self, event: AstrMessageEvent) -> bool:
         sender_id = self._string(event.get_sender_id())

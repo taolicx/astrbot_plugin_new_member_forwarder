@@ -8,7 +8,7 @@
   "admin_user_ids": {
     "type": "list",
     "description": "管理员 QQ 号",
-    "hint": "只有这些 QQ 可以私聊机器人录制新人资料、添加回复图片。留空表示不限制。",
+    "hint": "必须填写。只有这些 QQ 可以私聊机器人录制新人资料、添加/删除回复图片、执行测试命令。留空表示不允许任何人使用管理指令。",
     "default": []
   },
   "allowed_groups": {
