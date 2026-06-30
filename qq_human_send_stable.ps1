@@ -1,7 +1,6 @@
 param(
   [ValidateSet("probe", "send")]
   [string]$Mode = "probe",
-  [string]$GroupId = "",
   [int]$GroupRow = 1,
   [int]$MemberRow = 3,
   [int]$GroupBaseY = 150,
@@ -159,43 +158,6 @@ function Focus-Maximized([IntPtr]$Hwnd) {
   [NmfStable]::BringWindowToTop($Hwnd) | Out-Null
   [NmfStable]::SetForegroundWindow($Hwnd) | Out-Null
   Start-Sleep -Milliseconds 450
-}
-
-function Open-GroupByMqqApi([string]$Id) {
-  if (-not ($Id -match '^[0-9]+$')) {
-    return $false
-  }
-  $encoded = [uri]::EscapeDataString($Id)
-  $urls = @(
-    "mqqapi://im/chat?chat_type=group&uin=$encoded&version=1&src_type=web",
-    "mqqapi://im/chat?chat_type=group&groupuin=$encoded&version=1&src_type=web"
-  )
-  foreach ($url in $urls) {
-    Write-TraceStage ("open-group-mqqapi url=" + $url)
-    try {
-      Start-Process $url | Out-Null
-    } catch {
-      Write-TraceStage ("open-group-mqqapi-failed " + $_.Exception.Message)
-      continue
-    }
-    Start-Sleep -Milliseconds 1800
-    try {
-      $fresh = Get-MainQQWindow
-      Focus-Maximized $fresh.Handle
-      $score = Get-GroupPanelScore $fresh
-      Write-TraceStage ("open-group-mqqapi-score=" + ($score | ConvertTo-Json -Compress))
-      if ($score.GroupPanelDetected) {
-        return $true
-      }
-      Dismiss-BlockingDialog $fresh
-    } catch {
-      Write-TraceStage ("open-group-mqqapi-check-failed " + $_.Exception.Message)
-      try {
-        Dismiss-BlockingDialog (Get-MainQQWindow)
-      } catch {}
-    }
-  }
-  return $false
 }
 
 function Click-At([int]$X, [int]$Y) {
@@ -608,34 +570,6 @@ function Wait-ForGroupPanel($Frame, [int]$Seconds) {
   throw ("group member panel was not detected; score=" + ($last | ConvertTo-Json -Compress))
 }
 
-function Try-OpenGroupPanel($Frame) {
-  $right = [int]($Frame.Left + $Frame.Width)
-  $top = [int]$Frame.Top
-  $height = [int]$Frame.Height
-  $points = @(
-    @{ X = $right - 165; Y = $top + 100; Label = "top-grid" },
-    @{ X = $right - 135; Y = $top + 100; Label = "top-grid-arrow" },
-    @{ X = $right - 95; Y = $top + 100; Label = "top-shield" },
-    @{ X = $right - 34; Y = $top + 100; Label = "top-more" },
-    @{ X = $right - 255; Y = $top + [int]($height * 0.43); Label = "side-handle" },
-    @{ X = $right - 18; Y = $top + [int]($height * 0.43); Label = "right-edge" }
-  )
-  foreach ($pt in $points) {
-    Write-TraceStage ("try-open-group-panel " + $pt.Label + " x=" + $pt.X + " y=" + $pt.Y)
-    Click-At ([int]$pt.X) ([int]$pt.Y)
-    Start-Sleep -Milliseconds 700
-    $fresh = Get-MainQQWindow
-    $script:MainHandleValue = $fresh.HandleValue
-    $score = Get-GroupPanelScore $fresh
-    Write-TraceStage ("try-open-group-panel-score " + $pt.Label + "=" + ($score | ConvertTo-Json -Compress))
-    if ($score.GroupPanelDetected) {
-      return [pscustomobject]@{ Frame = $fresh; Score = $score }
-    }
-    Press-Escape
-  }
-  return $null
-}
-
 function Assert-PrivateChat($Frame) {
   $score = Get-GroupPanelScore $Frame
   if ($score.GroupPanelDetected -or $score.Ratio -gt 0.12) {
@@ -768,75 +702,31 @@ $script:MainHandleValue = $main.HandleValue
 [void]$steps.Add("maximized")
 Write-TraceStage "maximized"
 
-$openedByGroupId = $false
-if ($TargetQQ -and $GroupId) {
-  $openedByGroupId = Open-GroupByMqqApi $GroupId
-  $main = Get-MainQQWindow
-  $script:MainHandleValue = $main.HandleValue
-  [void]$shots.Add((Save-Shot $main "02-after-group-open-api.png"))
-}
-
-# Fallback: click the configured conversation row if local QQ protocol did not open the group.
+# Open the configured pinned group row. The customer keeps the target group pinned as row 1.
 $groupX = $main.Left + [int]([Math]::Min(230, [Math]::Max(140, $main.Width * 0.07)))
 $groupY = $main.Top + $GroupBaseY + (($GroupRow - 1) * 95)
-if (-not $openedByGroupId) {
-  Write-TraceStage ("click-group x=" + $groupX + " y=" + $groupY)
-  Click-At $groupX $groupY
-  Start-Sleep -Milliseconds 900
-  $main = Get-MainQQWindow
-  $script:MainHandleValue = $main.HandleValue
-  [void]$shots.Add((Save-Shot $main "02-after-group-click.png"))
-} else {
-  Write-TraceStage "skip-row-click-group-opened-by-id"
-}
+Write-TraceStage ("click-pinned-group x=" + $groupX + " y=" + $groupY)
+Click-At $groupX $groupY
+Start-Sleep -Milliseconds 1200
+$main = Get-MainQQWindow
+$script:MainHandleValue = $main.HandleValue
+[void]$shots.Add((Save-Shot $main "02-after-pinned-group-click.png"))
 if ($TargetQQ) {
-  Write-TraceStage "check-group-panel-target"
+  Write-TraceStage "verify-pinned-group-opened"
   $groupScore = Wait-ForGroupPanel $main 3
   Write-TraceStage ("group-panel-score=" + ($groupScore | ConvertTo-Json -Compress))
   if (-not $groupScore.GroupPanelDetected) {
-    $retryGroupX = $main.Left + 170
-    Write-TraceStage ("retry-click-group x=" + $retryGroupX + " y=" + $groupY)
-    Click-At $retryGroupX $groupY
+    Write-TraceStage ("retry-click-pinned-group x=" + $groupX + " y=" + $groupY)
+    Click-At $groupX $groupY
     Start-Sleep -Milliseconds 1200
     $main = Get-MainQQWindow
     $script:MainHandleValue = $main.HandleValue
-    [void]$shots.Add((Save-Shot $main "02b-after-group-retry.png"))
+    [void]$shots.Add((Save-Shot $main "02b-after-pinned-group-retry.png"))
     $groupScore = Wait-ForGroupPanel $main 3
     Write-TraceStage ("group-panel-retry-score=" + ($groupScore | ConvertTo-Json -Compress))
   }
   if (-not $groupScore.GroupPanelDetected) {
-    foreach ($tryY in @(($groupY - 24), $groupY, ($groupY + 24), ($groupY + 42))) {
-      foreach ($tryX in @(($main.Left + 108), ($main.Left + 155), ($main.Left + 210), ($main.Left + 265))) {
-        Write-TraceStage ("row-grid-click-group x=" + $tryX + " y=" + $tryY)
-        Click-AtFast ([int]$tryX) ([int]$tryY)
-        Start-Sleep -Milliseconds 500
-        $main = Get-MainQQWindow
-        $script:MainHandleValue = $main.HandleValue
-        $groupScore = Get-GroupPanelScore $main
-        Write-TraceStage ("row-grid-score=" + ($groupScore | ConvertTo-Json -Compress))
-        if ($groupScore.GroupPanelDetected) {
-          break
-        }
-      }
-      if ($groupScore.GroupPanelDetected) {
-        break
-      }
-    }
-    if ($groupScore.GroupPanelDetected) {
-      [void]$shots.Add((Save-Shot $main "02c-after-row-grid-click.png"))
-    }
-  }
-  if (-not $groupScore.GroupPanelDetected) {
-    $openedPanel = Try-OpenGroupPanel $main
-    if ($openedPanel) {
-      $main = $openedPanel.Frame
-      $script:MainHandleValue = $main.HandleValue
-      $groupScore = $openedPanel.Score
-      [void]$shots.Add((Save-Shot $main "02c-after-panel-open.png"))
-    }
-  }
-  if (-not $groupScore.GroupPanelDetected) {
-    throw ("group member panel was not detected before member search; score=" + ($groupScore | ConvertTo-Json -Compress))
+    throw ("pinned group was not opened after two clicks; score=" + ($groupScore | ConvertTo-Json -Compress))
   }
   [void]$steps.Add("group-panel-ok")
 } else {
