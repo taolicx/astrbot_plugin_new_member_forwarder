@@ -30,7 +30,7 @@ class TempSessionNotReadyError(RuntimeError):
     PLUGIN_NAME,
     "Codex",
     "管理员私聊录制新人入群资料，新人进群时自动私聊转发文字、图片和聊天记录。",
-    "1.4.36",
+    "1.4.37",
 )
 class NewMemberForwarderPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig | None = None):
@@ -43,6 +43,8 @@ class NewMemberForwarderPlugin(Star):
         self._image_buckets: dict[str, dict[str, Any]] = {}
         self._image_tasks: dict[str, asyncio.Task] = {}
         self._delivery_inflight: dict[str, int] = {}
+        self._delivery_queue_lock = asyncio.Lock()
+        self._last_delivery_finished_at = 0.0
         self._qq_desktop_warmup_sent_at: dict[str, float] = {}
         self._qq_human_group_warmup_last_at: dict[str, float] = {}
         self._qq_human_group_warmup_results: dict[str, dict[str, Any]] = {}
@@ -60,10 +62,10 @@ class NewMemberForwarderPlugin(Star):
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.media_dir.mkdir(parents=True, exist_ok=True)
         logger.info(
-            "new_member_forwarder: config file=%s human_warmup=%s stable_member_search=%s original_forward_only=%s",
+            "new_member_forwarder: config file=%s human_warmup=%s queue_gap=%.1fs original_forward_only=%s",
             self.config_file,
             self._get_bool("qq_human_group_warmup_enabled", False),
-            self._get_bool("qq_human_group_warmup_stable_member_search_enabled", True),
+            max(0.0, self._get_float("delivery_queue_gap_seconds", 1.0)),
             True,
         )
 
@@ -301,7 +303,7 @@ class NewMemberForwarderPlugin(Star):
             yield event.plain_result("用法：/新人欢迎开路测试 QQ号 来源群号")
             return
 
-        ok = await self._send_qq_human_group_warmup_message(group_id, user_id, force=True)
+        ok = await self._send_qq_human_group_warmup_message_queued(group_id, user_id, force=True)
         if ok:
             yield event.plain_result(f"真人开路已执行：QQ {user_id}，来源群 {group_id}。")
             return
@@ -331,7 +333,7 @@ class NewMemberForwarderPlugin(Star):
             yield event.plain_result("用法：/新人欢迎真人开路测试 QQ号 来源群号")
             return
 
-        ok = await self._send_qq_human_group_warmup_message(
+        ok = await self._send_qq_human_group_warmup_message_queued(
             group_id,
             user_id,
             force=True,
@@ -764,6 +766,38 @@ class NewMemberForwarderPlugin(Star):
         self_id: str = "",
         group_id: str = "",
     ) -> None:
+        user_id = self._string(user_id)
+        group_id = self._string(group_id)
+        wait_started = time.time()
+        if self._delivery_queue_lock.locked():
+            logger.info(
+                "new_member_forwarder: queued delivery for user %s in group %s because another delivery is running.",
+                user_id,
+                group_id or "-",
+            )
+        async with self._delivery_queue_lock:
+            waited = time.time() - wait_started
+            if waited >= 0.1:
+                logger.info(
+                    "new_member_forwarder: delivery queue turn started for user %s in group %s after %.1fs.",
+                    user_id,
+                    group_id or "-",
+                    waited,
+                )
+            await self._sleep_before_next_delivery(user_id, group_id)
+            try:
+                await self._deliver_private_locked(bot, user_id, items, self_id, group_id)
+            finally:
+                self._last_delivery_finished_at = time.time()
+
+    async def _deliver_private_locked(
+        self,
+        bot: Any,
+        user_id: str,
+        items: list[dict[str, Any]],
+        self_id: str = "",
+        group_id: str = "",
+    ) -> None:
         gap = max(0.0, self._get_float("message_gap_seconds", 0.8))
         for item in items:
             if not isinstance(item, dict):
@@ -791,6 +825,21 @@ class NewMemberForwarderPlugin(Star):
             sent = await self._deliver_private_item(bot, user_id, item, self_id, group_id)
             if sent and gap:
                 await asyncio.sleep(gap)
+
+    async def _sleep_before_next_delivery(self, user_id: str, group_id: str) -> None:
+        queue_gap = max(0.0, self._get_float("delivery_queue_gap_seconds", 1.0))
+        if not queue_gap or not self._last_delivery_finished_at:
+            return
+        remaining = queue_gap - (time.time() - self._last_delivery_finished_at)
+        if remaining <= 0:
+            return
+        logger.info(
+            "new_member_forwarder: wait %.1fs before next queued delivery for user %s in group %s.",
+            remaining,
+            user_id,
+            group_id or "-",
+        )
+        await asyncio.sleep(remaining)
 
     async def _deliver_private_item(
         self,
@@ -1172,6 +1221,45 @@ class NewMemberForwarderPlugin(Star):
             result.get("reason") or result,
         )
         return False
+
+    async def _send_qq_human_group_warmup_message_queued(
+        self,
+        group_id: str,
+        user_id: str,
+        target_name: str = "",
+        group_name: str = "",
+        *,
+        force: bool = False,
+    ) -> bool:
+        group_id = self._string(group_id)
+        user_id = self._string(user_id)
+        wait_started = time.time()
+        if self._delivery_queue_lock.locked():
+            logger.info(
+                "new_member_forwarder: queued human warmup test for user %s in group %s because another delivery is running.",
+                user_id,
+                group_id or "-",
+            )
+        async with self._delivery_queue_lock:
+            waited = time.time() - wait_started
+            if waited >= 0.1:
+                logger.info(
+                    "new_member_forwarder: human warmup test queue turn started for user %s in group %s after %.1fs.",
+                    user_id,
+                    group_id or "-",
+                    waited,
+                )
+            await self._sleep_before_next_delivery(user_id, group_id)
+            try:
+                return await self._send_qq_human_group_warmup_message(
+                    group_id,
+                    user_id,
+                    target_name,
+                    group_name,
+                    force=force,
+                )
+            finally:
+                self._last_delivery_finished_at = time.time()
 
     async def _send_qq_desktop_warmup_message(
         self,

@@ -29,6 +29,12 @@
     "hint": "录制了多条资料时，每发完一条后等待多少秒再发下一条。",
     "default": 0.8
   },
+  "delivery_queue_gap_seconds": {
+    "type": "float",
+    "description": "新人队列间隔秒数",
+    "hint": "多人短时间进群时会排队处理；前一个新人完整处理结束后，等待多少秒再处理下一个。",
+    "default": 1.0
+  },
   "dedupe_window_seconds": {
     "type": "float",
     "description": "重复入群事件去重秒数",
