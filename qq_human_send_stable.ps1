@@ -189,6 +189,15 @@ function Click-AtFast([int]$X, [int]$Y) {
   Start-Sleep -Milliseconds 90
 }
 
+function RightClick-At([int]$X, [int]$Y) {
+  [NmfStable]::SetCursorPos($X, $Y) | Out-Null
+  Start-Sleep -Milliseconds 100
+  [NmfStable]::mouse_event(8, 0, 0, 0, [UIntPtr]::Zero)
+  Start-Sleep -Milliseconds 70
+  [NmfStable]::mouse_event(16, 0, 0, 0, [UIntPtr]::Zero)
+  Start-Sleep -Milliseconds 450
+}
+
 function DoubleClick-At([int]$X, [int]$Y) {
   [NmfStable]::SetCursorPos($X, $Y) | Out-Null
   Start-Sleep -Milliseconds 100
@@ -810,6 +819,56 @@ function Assert-PrivateChat($Frame, [string]$ShotPath, [string]$ExpectedQQ) {
   $score
 }
 
+function Wait-ForPrivateChatQuick([int]$Milliseconds, [string]$Prefix) {
+  $deadline = (Get-Date).AddMilliseconds([Math]::Max(300, $Milliseconds))
+  $attempt = 0
+  while ((Get-Date) -lt $deadline) {
+    $attempt += 1
+    try {
+      $main = Get-MainQQWindow
+      $script:MainHandleValue = $main.HandleValue
+      Focus-Maximized $main.Handle
+      $main = Get-MainQQWindow
+      $script:MainHandleValue = $main.HandleValue
+      $shot = Save-Shot $main ($Prefix + "-private-chat-probe-" + $attempt + ".png")
+      [void]$shots.Add($shot)
+      [void](Assert-PrivateChat $main $shot $TargetQQ)
+      Write-TraceStage ("private-chat-opened-by-context-menu attempt=" + $attempt)
+      return $main
+    } catch {
+      Write-TraceStage ("private-chat-probe-not-ready " + $Prefix + " attempt=" + $attempt + " reason=" + $_.Exception.Message)
+    }
+    Start-Sleep -Milliseconds 280
+  }
+  return $null
+}
+
+function Click-ContextMenuSendMessage([object]$Frame, [int]$RightClickX, [int]$RightClickY, [string]$Prefix) {
+  $menuShot = Save-Shot $Frame ($Prefix + "-context-menu.png")
+  [void]$shots.Add($menuShot)
+  try {
+    foreach ($line in @(Read-ImageOcrLines $menuShot)) {
+      $text = (($line.Text + "") -replace "\s+", "")
+      if (-not ($text -like "*发送消息*" -or $text -like "*发消息*")) { continue }
+      $centerX = [int]($Frame.Left + [double]$line.Left + ([double]$line.Width / 2.0))
+      $centerY = [int]($Frame.Top + [double]$line.Top + ([double]$line.Height / 2.0))
+      if ([Math]::Abs($centerX - $RightClickX) -gt 280) { continue }
+      if ($centerY -lt ($RightClickY - 220) -or $centerY -gt ($RightClickY + 280)) { continue }
+      Write-TraceStage ("click-context-menu-send-message-ocr x=" + $centerX + " y=" + $centerY + " text=" + $text)
+      Click-At $centerX $centerY
+      return $true
+    }
+  } catch {
+    Write-TraceStage ("context-menu-send-message-ocr-failed " + $_.Exception.Message)
+  }
+
+  $fallbackX = [int]([Math]::Max($Frame.Left + 20, [Math]::Min($Frame.Left + $Frame.Width - 20, $RightClickX + 72)))
+  $fallbackY = [int]([Math]::Max($Frame.Top + 20, [Math]::Min($Frame.Top + $Frame.Height - 20, $RightClickY + 18)))
+  Write-TraceStage ("click-context-menu-send-message-fallback x=" + $fallbackX + " y=" + $fallbackY)
+  Click-At $fallbackX $fallbackY
+  return $true
+}
+
 function Close-ProfilePopups {
   foreach ($popup in @(Find-QQWindows | Where-Object {
     $title = $_.Title + ""
@@ -885,7 +944,7 @@ function Wait-ForProfileQuick([int]$Milliseconds) {
   return $null
 }
 
-function Open-SearchResultProfile($MainFrame, [int]$BaseY) {
+function New-SearchResultClickPoints($MainFrame, [int]$BaseY) {
   $right = [int]($MainFrame.Left + $MainFrame.Width)
   $top = [int]$MainFrame.Top
   $rowY = [int]($top + $BaseY)
@@ -896,6 +955,54 @@ function Open-SearchResultProfile($MainFrame, [int]$BaseY) {
   [void]$points.Add([pscustomobject]@{ X = $right - 238; Y = $rowY - 18; Label = "first-avatar-high" })
   [void]$points.Add([pscustomobject]@{ X = $right - 210; Y = $rowY - 18; Label = "first-name-high" })
   [void]$points.Add([pscustomobject]@{ X = $right - 238; Y = $rowY + 18; Label = "first-avatar-low" })
+  return $points
+}
+
+function New-PrivateChatOpenedResult($Frame, [string]$Via) {
+  [pscustomobject]@{
+    PrivateChatOpened = $true
+    Via = $Via
+    HandleValue = $Frame.HandleValue
+    Left = $Frame.Left
+    Top = $Frame.Top
+    Width = $Frame.Width
+    Height = $Frame.Height
+  }
+}
+
+function Open-SearchResultPrivateChat($MainFrame, [int]$BaseY, $Calibration = $null, [string]$Prefix = "search") {
+  $points = New-SearchResultClickPoints $MainFrame $BaseY
+  $orderedPoints = New-Object System.Collections.ArrayList
+  $calibratedResult = Get-CalibratedPoint $Calibration "searchResultFirst" $MainFrame
+  if ($calibratedResult) {
+    $script:CalibrationUsed = $true
+    [void]$orderedPoints.Add([pscustomobject]@{ X = $calibratedResult.X; Y = $calibratedResult.Y; Label = "calibrated-first" })
+  }
+  foreach ($pt in $points) {
+    [void]$orderedPoints.Add($pt)
+  }
+
+  foreach ($pt in $orderedPoints) {
+    Write-TraceStage ("right-click-search-result-send-message " + $Prefix + " " + $pt.Label + " x=" + $pt.X + " y=" + $pt.Y)
+    RightClick-At ([int]$pt.X) ([int]$pt.Y)
+    $fresh = Get-MainQQWindow
+    $script:MainHandleValue = $fresh.HandleValue
+    [void](Click-ContextMenuSendMessage $fresh ([int]$pt.X) ([int]$pt.Y) ($Prefix + "-" + $pt.Label))
+    $privateFrame = Wait-ForPrivateChatQuick 3600 ($Prefix + "-" + $pt.Label)
+    if ($privateFrame) {
+      return (New-PrivateChatOpenedResult $privateFrame ("context-menu-" + $pt.Label))
+    }
+    Press-Escape
+    Start-Sleep -Milliseconds 250
+  }
+  return $null
+}
+
+function Open-SearchResultProfile($MainFrame, [int]$BaseY) {
+  $right = [int]($MainFrame.Left + $MainFrame.Width)
+  $top = [int]$MainFrame.Top
+  $rowY = [int]($top + $BaseY)
+  $points = New-SearchResultClickPoints $MainFrame $BaseY
 
   foreach ($pt in $points) {
     Write-TraceStage ("click-search-result " + $pt.Label + " x=" + $pt.X + " y=" + $pt.Y)
@@ -1192,7 +1299,13 @@ function Invoke-MemberSearchFromPage($MainFrame, [string]$Prefix, $Calibration =
   $memberResultShot = Save-Shot $fresh ($Prefix + "-member-search-result.png")
   [void]$shots.Add($memberResultShot)
   $script:LastGroupLikeShot = $memberResultShot
-  Write-TraceStage ("open-search-result-profile " + $Prefix)
+  Write-TraceStage ("open-search-result-private-chat-context-menu " + $Prefix)
+  $privateOpened = Open-SearchResultPrivateChat $fresh $SearchResultBaseY $Calibration $Prefix
+  if ($privateOpened) {
+    return $privateOpened
+  }
+
+  Write-TraceStage ("context-menu-private-chat-not-opened-try-profile " + $Prefix)
   $calibratedResult = Get-CalibratedPoint $Calibration "searchResultFirst" $fresh
   if ($calibratedResult) {
     $script:CalibrationUsed = $true
@@ -1333,7 +1446,15 @@ if (-not $TargetQQ) {
   Click-At $memberX $memberY
   $profile = Try-WaitForProfile $WaitSeconds
 }
-if (-not $profile) {
+
+$privateChatOpenedBySearch = $false
+if ($profile -and $profile.PSObject.Properties["PrivateChatOpened"] -and [bool]$profile.PrivateChatOpened) {
+  $privateChatOpenedBySearch = $true
+  Write-TraceStage ("private-chat-opened-result via=" + $profile.Via)
+  [void]$steps.Add("private-chat-opened-by-search-context-menu")
+}
+
+if (-not $profile -and -not $privateChatOpenedBySearch) {
   Write-TraceStage "wait-profile"
   $profileWaitSeconds = $WaitSeconds
   if ($TargetQQ) {
@@ -1348,7 +1469,18 @@ if (-not $profile) {
 }
 
 $profileOcr = ""
-if ($profile) {
+if ($privateChatOpenedBySearch) {
+  $main = Get-MainQQWindow
+  $script:MainHandleValue = $main.HandleValue
+  Focus-Maximized $main.Handle
+  $main = Get-MainQQWindow
+  $script:MainHandleValue = $main.HandleValue
+  $privateBeforeSendShot = Save-Shot $main "05-private-chat-before-send.png"
+  [void]$shots.Add($privateBeforeSendShot)
+  Write-TraceStage "assert-private-chat-context-menu"
+  $privateScore = Assert-PrivateChat $main $privateBeforeSendShot $TargetQQ
+  [void]$steps.Add("private-chat-ok")
+} elseif ($profile) {
   Write-TraceStage ("profile-window=" + ($profile | ConvertTo-Json -Compress))
   $profileShot = Save-Shot $profile "04-profile-card.png"
   [void]$shots.Add($profileShot)
@@ -1406,18 +1538,21 @@ if ($profile) {
   $sendY = $storedSend.Y
   Write-TraceStage ("click-send-button-stored-calibration x=" + $sendX + " y=" + $sendY)
 }
-Click-At $sendX $sendY
-Start-Sleep -Seconds 1
-$main = Get-MainQQWindow
-$script:MainHandleValue = $main.HandleValue
-Focus-Maximized $main.Handle
-$main = Get-MainQQWindow
-$script:MainHandleValue = $main.HandleValue
-$privateBeforeSendShot = Save-Shot $main "05-private-chat-before-send.png"
-[void]$shots.Add($privateBeforeSendShot)
-Write-TraceStage "assert-private-chat"
-$privateScore = Assert-PrivateChat $main $privateBeforeSendShot $TargetQQ
-[void]$steps.Add("private-chat-ok")
+
+if (-not $privateChatOpenedBySearch) {
+  Click-At $sendX $sendY
+  Start-Sleep -Seconds 1
+  $main = Get-MainQQWindow
+  $script:MainHandleValue = $main.HandleValue
+  Focus-Maximized $main.Handle
+  $main = Get-MainQQWindow
+  $script:MainHandleValue = $main.HandleValue
+  $privateBeforeSendShot = Save-Shot $main "05-private-chat-before-send.png"
+  [void]$shots.Add($privateBeforeSendShot)
+  Write-TraceStage "assert-private-chat"
+  $privateScore = Assert-PrivateChat $main $privateBeforeSendShot $TargetQQ
+  [void]$steps.Add("private-chat-ok")
+}
 
 $sent = $false
 if ($Mode -eq "send") {
