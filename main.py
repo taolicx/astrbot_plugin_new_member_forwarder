@@ -30,7 +30,7 @@ class TempSessionNotReadyError(RuntimeError):
     PLUGIN_NAME,
     "Codex",
     "管理员私聊录制新人入群资料，新人进群时自动私聊转发文字、图片和聊天记录。",
-    "1.4.27",
+    "1.4.28",
 )
 class NewMemberForwarderPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig | None = None):
@@ -388,6 +388,12 @@ class NewMemberForwarderPlugin(Star):
         source_group_id: str = "",
     ):
         if not self._can_run_admin_or_self_command(event):
+            return
+
+        if not self._get_bool("qq_human_group_warmup_enabled", False):
+            yield event.plain_result(
+                "真人开路已关闭：当前不会执行 QQ 桌面自动化。请用 /新人欢迎测试 QQ号 来源群号 测试 API 私聊转发。"
+            )
             return
 
         user_id = self._string(target_qq or event.get_sender_id())
@@ -1193,14 +1199,6 @@ class NewMemberForwarderPlugin(Star):
             return False
         member_name = self._member_display_name(member_info)
         group_name = await self._get_group_display_name(bot, group_id, self_id)
-        human_sent = await self._send_qq_human_group_warmup_message(
-            group_id,
-            user_id,
-            member_name,
-            group_name,
-        )
-        if human_sent:
-            return True
         llbot_activated = await self._activate_llbot_temp_context(bot, group_id, user_id)
         opened = await self._open_qq_profile_context(group_id, user_id)
         if llbot_activated or opened:
@@ -1210,6 +1208,16 @@ class NewMemberForwarderPlugin(Star):
                 member_name,
                 group_name,
             )
+            return True
+
+        human_sent = await self._send_qq_human_group_warmup_message(
+            group_id,
+            user_id,
+            member_name,
+            group_name,
+        )
+        if human_sent:
+            return True
         return True
 
     async def _open_qq_profile_context(self, group_id: str, user_id: str) -> bool:
