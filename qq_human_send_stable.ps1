@@ -7,7 +7,10 @@
   [int]$MemberBaseY = 322,
   [int]$SearchResultBaseY = 322,
   [string]$TargetQQ = "",
+  [ValidateSet("text", "image")]
+  [string]$MessageKind = "text",
   [string]$Message = "",
+  [string]$ImagePath = "",
   [int]$WaitSeconds = 8,
   [string]$OutDir = "",
   [string]$TraceFile = "",
@@ -71,8 +74,11 @@ public class NmfStable {
 $script:ProfileTitle = -join ([char[]](0x8d44, 0x6599, 0x5361))
 $script:NoticeTitle = -join ([char[]](0x7fa4, 0x516c, 0x544a))
 $script:LastGroupLikeShot = ""
-if (-not $Message) {
+if ($MessageKind -eq "text" -and -not $Message) {
   $Message = -join ([char[]](0x6b22, 0x8fce, 0x8fdb, 0x7fa4))
+}
+if ($MessageKind -eq "image" -and -not $ImagePath) {
+  throw "warmup image path is empty"
 }
 
 function Get-Text([IntPtr]$Hwnd) {
@@ -256,6 +262,45 @@ function Paste-Text([string]$Text) {
   [NmfStable]::keybd_event(0x56, 0, 2, [UIntPtr]::Zero)
   [NmfStable]::keybd_event(0x11, 0, 2, [UIntPtr]::Zero)
   Start-Sleep -Milliseconds 300
+}
+
+function Set-ClipboardImageSafe([string]$Path) {
+  if (-not $Path) {
+    throw "warmup image path is empty"
+  }
+  $resolved = Resolve-Path -LiteralPath $Path -ErrorAction Stop
+  if (-not (Test-Path -LiteralPath $resolved.Path -PathType Leaf)) {
+    throw ("warmup image file not found: " + $Path)
+  }
+
+  $lastError = $null
+  for ($i = 0; $i -lt 20; $i++) {
+    $loaded = $null
+    $bitmap = $null
+    try {
+      $loaded = [System.Drawing.Image]::FromFile($resolved.Path)
+      $bitmap = New-Object System.Drawing.Bitmap $loaded
+      [System.Windows.Forms.Clipboard]::SetImage($bitmap)
+      return $true
+    } catch {
+      $lastError = $_.Exception.Message
+    } finally {
+      if ($bitmap) { $bitmap.Dispose() }
+      if ($loaded) { $loaded.Dispose() }
+    }
+    Start-Sleep -Milliseconds (160 + ($i * 40))
+  }
+  throw ("clipboard image write failed after retries: " + $lastError)
+}
+
+function Paste-Image([string]$Path) {
+  [void](Set-ClipboardImageSafe $Path)
+  Start-Sleep -Milliseconds 180
+  [NmfStable]::keybd_event(0x11, 0, 0, [UIntPtr]::Zero)
+  [NmfStable]::keybd_event(0x56, 0, 0, [UIntPtr]::Zero)
+  [NmfStable]::keybd_event(0x56, 0, 2, [UIntPtr]::Zero)
+  [NmfStable]::keybd_event(0x11, 0, 2, [UIntPtr]::Zero)
+  Start-Sleep -Milliseconds 600
 }
 
 function Read-ImageText([string]$Path) {
@@ -1241,8 +1286,13 @@ if ($Mode -eq "send") {
   Write-TraceStage ("click-private-editor x=" + $privateEditorX + " y=" + $privateEditorY)
   Click-At $privateEditorX $privateEditorY
   Press-CtrlA-Backspace
-  Write-TraceStage "paste-warmup-message"
-  Paste-Text $Message
+  if ($MessageKind -eq "image") {
+    Write-TraceStage "paste-warmup-image"
+    Paste-Image $ImagePath
+  } else {
+    Write-TraceStage "paste-warmup-message"
+    Paste-Text $Message
+  }
   Write-TraceStage "press-enter"
   Press-Enter
   Start-Sleep -Seconds 1
@@ -1267,7 +1317,9 @@ $result = [ordered]@{
   mode = $Mode
   sent = $sent
   targetQQ = $TargetQQ
+  messageKind = $MessageKind
   message = $Message
+  imagePath = $ImagePath
   groupRow = $GroupRow
   memberRow = $MemberRow
   groupBaseY = $GroupBaseY
