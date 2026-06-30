@@ -574,6 +574,21 @@ function Wait-ForGroupPanel($Frame, [int]$Seconds) {
   throw ("group member panel was not detected; score=" + ($last | ConvertTo-Json -Compress))
 }
 
+function Test-CurrentPageLooksLikeGroup($Frame) {
+  $probeShot = Save-Shot $Frame "02-current-page-before-decision.png"
+  [void]$shots.Add($probeShot)
+  $score = Get-GroupPanelScore $Frame
+  $memberSearchY = Get-MemberSearchY $Frame $probeShot
+  $looksLikeGroup = [bool]($score.GroupPanelDetected -or $memberSearchY -gt 0)
+  Write-TraceStage ("current-page-group-probe looksLikeGroup=" + $looksLikeGroup + " memberSearchY=" + $memberSearchY + " score=" + ($score | ConvertTo-Json -Compress))
+  [pscustomobject]@{
+    LooksLikeGroup = $looksLikeGroup
+    Score = $score
+    MemberSearchY = $memberSearchY
+    Shot = $probeShot
+  }
+}
+
 function Assert-PrivateChat($Frame) {
   $score = Get-GroupPanelScore $Frame
   if ($score.GroupPanelDetected -or $score.Ratio -gt 0.12) {
@@ -973,13 +988,22 @@ $profile = $null
 $usedMemberSearch = $false
 if ($TargetQQ) {
   $usedMemberSearch = $true
-  Write-TraceStage "try-current-member-search-before-click-group"
-  $profile = Invoke-MemberSearchFromPage $main "02-current" $script:Calibration
-  if ($profile) {
-    Write-TraceStage "current-member-search-profile-opened"
-    [void]$steps.Add("current-member-search-ok")
+  $currentPageProbe = Test-CurrentPageLooksLikeGroup $main
+  $groupScore = $currentPageProbe.Score
+  if ($currentPageProbe.LooksLikeGroup) {
+    Write-TraceStage "try-current-member-search-before-click-group"
+    $profile = Invoke-MemberSearchFromPage $main "02-current" $script:Calibration
+    if ($profile) {
+      Write-TraceStage "current-member-search-profile-opened"
+      [void]$steps.Add("current-member-search-ok")
+    } else {
+      Write-TraceStage "current-member-search-no-profile"
+    }
   } else {
-    Write-TraceStage "current-member-search-no-profile"
+    Write-TraceStage "skip-current-member-search-page-not-group"
+  }
+
+  if (-not $profile) {
     Press-Escape
     Press-CtrlA-Backspace
     Close-ProfilePopups
