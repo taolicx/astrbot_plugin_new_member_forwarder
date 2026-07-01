@@ -1187,13 +1187,12 @@ function Invoke-Calibration {
   }
   [void]$shots.Add((Save-Shot $mainFrame "calibrate-02-after-search-input.png"))
 
-  $points.searchResultFirst = Wait-CalibratedCursorPoint $mainFrame "searchResultFirst" "main" "3/5 第一条搜索结果" "把鼠标放到右侧第一条搜索结果的头像或昵称上，不要点击，然后按 F8。下一步会校准右键菜单里的发送消息或发起私信。" 180
+  $points.searchResultFirst = Wait-CalibratedCursorPoint $mainFrame "searchResultFirst" "main" "3/5 第一条搜索结果" "把鼠标放到右侧第一条搜索结果的头像或昵称上，不要点击，然后按 F8。按完后脚本会立刻右键第一条结果；菜单出来后，把鼠标移到发送消息或发起私信菜单项上，再按 F8。" 180
   $mainFrame = Get-MainQQWindow
   $script:MainHandleValue = $mainFrame.HandleValue
   $script:LastGroupLikeShot = Save-Shot $mainFrame "calibrate-03-search-result-before-context-menu.png"
   [void]$shots.Add($script:LastGroupLikeShot)
   $resultPoint = Get-CalibratedPoint ([pscustomobject]@{ points = [pscustomobject]$points }) "searchResultFirst" $mainFrame
-  [System.Windows.Forms.MessageBox]::Show("点确定后会右键第一条搜索结果。右键菜单出现后，把鼠标移到发送消息或发起私信菜单项上，按 F8 记录并点击。按 ESC 可取消。", "新人欢迎校准 4/5", "OK", "Information") | Out-Null
   Write-TraceStage ("calibrate-right-click-search-result x=" + $resultPoint.X + " y=" + $resultPoint.Y)
   RightClick-At $resultPoint.X $resultPoint.Y
   $mainFrame = Get-MainQQWindow
